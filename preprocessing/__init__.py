@@ -4,6 +4,7 @@ from .frame_sampler import FrameSampler
 from .transforms import get_train_transforms, get_val_transforms
 from .pipeline import PreprocessingPipeline
 from .preprocess_dataset import DatasetPreprocessor, create_preprocessor_from_config
+from .preprocess_celeb_df import CelebDFPreprocessor
 
 __all__ = [
     'FaceExtractor',
@@ -14,7 +15,8 @@ __all__ = [
     'PreprocessingPipeline',
     'create_pipeline_from_config',
     'DatasetPreprocessor',
-    'create_preprocessor_from_config'
+    'create_preprocessor_from_config',
+    'CelebDFPreprocessor'
 ]
 
 def create_pipeline_from_config(config):

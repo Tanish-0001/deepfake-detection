@@ -532,7 +532,7 @@ class Trainer:
         if not best_path.exists():
             raise FileNotFoundError(f"No best checkpoint found at {best_path}")
         
-        checkpoint = torch.load(best_path, map_location=self.device)
+        checkpoint = torch.load(best_path, map_location=self.device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         model = model.to(self.device)
         

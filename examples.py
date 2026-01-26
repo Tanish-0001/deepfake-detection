@@ -192,12 +192,10 @@ def example_full_pipeline():
     from models import get_model
     model = get_model(config.model.model_name, num_classes=config.model.num_classes)
     
-    # 4. Training loop
+    # # 4. Training loop
     from training import create_trainer
     trainer = create_trainer(config)
-    results = trainer.train(model, train_loader, val_loader)
-
-    print(f"Trained model in {results['total_time']:.2f} seconds")
+    # results = trainer.train(model, train_loader, val_loader)
     
     # 5. Evaluate on test set
     # Load best model and evaluate
