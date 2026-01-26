@@ -114,13 +114,24 @@ class Trainer:
     
     def _config_to_dict(self) -> dict:
         """Convert config to dictionary for saving."""
-        return {
+        def convert_paths(obj):
+            """Recursively convert Path objects to strings."""
+            if isinstance(obj, dict):
+                return {k: convert_paths(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_paths(item) for item in obj]
+            elif isinstance(obj, Path):
+                return str(obj)
+            else:
+                return obj
+        
+        return convert_paths({
             'data': asdict(self.config.data),
             'model': asdict(self.config.model),
             'training': asdict(self.config.training),
             'experiment_name': self.config.experiment_name,
             'seed': self.config.seed
-        }
+        })
     
     def _create_optimizer(self, model: nn.Module) -> optim.Optimizer:
         """Create optimizer based on configuration."""
