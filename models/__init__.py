@@ -1,11 +1,13 @@
 # Models module
 from .simple_cnn import SimpleCNN, SimpleCNNLarge
 from .base_model import BaseModel
+from .dino_model import DinoModel
 
 __all__ = [
     'BaseModel',
     'SimpleCNN',
     'SimpleCNNLarge',
+    'DinoModel',
     'get_model'
 ]
 
@@ -15,7 +17,7 @@ def get_model(model_name: str, **kwargs):
     Factory function to create models by name.
     
     Args:
-        model_name: Name of the model ('simple_cnn', 'simple_cnn_large')
+        model_name: Name of the model ('simple_cnn', 'simple_cnn_large', 'dino_model')
         **kwargs: Additional arguments to pass to the model constructor
     
     Returns:
@@ -24,6 +26,7 @@ def get_model(model_name: str, **kwargs):
     models = {
         'simple_cnn': SimpleCNN,
         'simple_cnn_large': SimpleCNNLarge,
+        'dino_model': DinoModel
     }
     
     if model_name not in models:

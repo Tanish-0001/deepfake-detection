@@ -59,7 +59,7 @@ def example_preprocessing():
 def example_dataset_loading():
     """Example of loading the FF++ dataset."""
     print("\n" + "=" * 50)
-    print("Dataset Loading Example")
+    print("Dataset Loading Example (Single Dataset)")
     print("=" * 50)
     
     from config import Config
@@ -84,6 +84,133 @@ def example_dataset_loading():
     )
     
     print(f"Dataloaders created:\n  - Train batches: {len(train_loader)}\n  - Val batches: {len(val_loader)}\n  - Test batches: {len(test_loader)}")
+    return train_loader, val_loader, test_loader
+
+
+def example_combined_dataset_loading():
+    """Example of loading combined FF++ and Celeb-DF datasets."""
+    print("\n" + "=" * 50)
+    print("Combined Dataset Loading Example")
+    print("=" * 50)
+    
+    from data import (
+        create_combined_dataloaders,
+        get_dataloaders,
+        DatasetConfig,
+        DatasetRegistry
+    )
+    
+    # Show available datasets
+    print("\nRegistered datasets:")
+    for name in DatasetRegistry.list_datasets():
+        print(f"  - {name}")
+    
+    # Method 1: Using DatasetConfig objects (more explicit)
+    print("\n--- Method 1: Using DatasetConfig objects ---")
+    dataset_configs = [
+        DatasetConfig(
+            name="ff",
+            root_dir="Datasets/FF",
+            weight=1.0,
+            manipulation_types=["Deepfakes", "Face2Face", "FaceSwap"]
+        ),
+        DatasetConfig(
+            name="celeb_df",
+            root_dir="Datasets/Celeb-DF-v2",
+            weight=1.5  # Higher weight = more samples from this dataset
+        ),
+    ]
+    
+    train_loader, val_loader, test_loader = create_combined_dataloaders(
+        dataset_configs=dataset_configs,
+        batch_size=32,
+        frames_per_video=10,
+        preload_cache=True
+    )
+    
+    print(f"\nCombined dataloaders created:")
+    print(f"  - Train batches: {len(train_loader)}")
+    print(f"  - Val batches: {len(val_loader)}")
+    print(f"  - Test batches: {len(test_loader)}")
+    
+    # Method 2: Using dictionaries (more concise)
+    print("\n--- Method 2: Using dictionaries ---")
+    configs_as_dicts = [
+        {"name": "ff", "root_dir": "Datasets/FF"},
+        {"name": "celeb_df", "root_dir": "Datasets/Celeb-DF-v2"},
+    ]
+    
+    # Using the universal get_dataloaders function
+    train_loader, val_loader, test_loader = get_dataloaders(
+        dataset_type="combined",
+        dataset_configs=configs_as_dicts,
+        batch_size=32
+    )
+    
+    return train_loader, val_loader, test_loader
+
+
+def example_combined_dataset_with_config():
+    """Example using Config class for combined dataset training."""
+    print("\n" + "=" * 50)
+    print("Combined Dataset with Config Example")
+    print("=" * 50)
+    
+    from config import Config, DatasetSourceConfig
+    from data import get_dataloaders
+    from pathlib import Path
+    
+    # Create config for combined training
+    config = Config()
+    
+    # Set to combined mode
+    config.data.dataset_mode = "combined"
+    
+    # Configure dataset sources
+    config.data.dataset_sources = [
+        DatasetSourceConfig(
+            name="ff",
+            root_dir=Path("Datasets/FF"),
+            weight=1.0,
+            enabled=True,
+            extra_kwargs={
+                "manipulation_types": ["Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures"]
+            }
+        ),
+        DatasetSourceConfig(
+            name="celeb_df",
+            root_dir=Path("Datasets/Celeb-DF-v2"),
+            weight=1.2,
+            enabled=True
+        ),
+        # Example: Disabled dataset (won't be loaded)
+        # DatasetSourceConfig(
+        #     name="dfdc",
+        #     root_dir=Path("Datasets/DFDC"),
+        #     weight=1.0,
+        #     enabled=False  # Disabled
+        # ),
+    ]
+    
+    print("Combined training configuration:")
+    print(f"  - Mode: {config.data.dataset_mode}")
+    print(f"  - Dataset sources:")
+    for src in config.data.dataset_sources:
+        status = "enabled" if src.enabled else "disabled"
+        print(f"    - {src.name}: {src.root_dir} (weight={src.weight}, {status})")
+    
+    # Get enabled dataset configs
+    dataset_configs = config.data.get_enabled_dataset_configs()
+    
+    # Create dataloaders
+    train_loader, val_loader, test_loader = get_dataloaders(
+        dataset_type="combined",
+        dataset_configs=dataset_configs,
+        batch_size=config.data.batch_size,
+        frames_per_video=config.data.frames_per_video,
+        use_dataset_weights=config.data.use_dataset_weights
+    )
+    
     return train_loader, val_loader, test_loader
 
 
@@ -143,11 +270,9 @@ def example_model_creation():
 
 def example_full_pipeline():
     """Example of the full pipeline from config to model."""
-    print("\n" + "=" * 50)
-    print("Full Pipeline Example")
-    print("=" * 50)
     
-    from config import Config
+    from config import Config, DatasetSourceConfig
+    from data import create_ff_dataloaders, get_dataloaders
     
     # Create configuration
     config = Config()
@@ -155,14 +280,62 @@ def example_full_pipeline():
     # Modify as needed
     config.data.frames_per_video = 10
     config.data.batch_size = 32
-    config.data.manipulation_types = ["Deepfakes", "Face2Face"]
     
-    config.model.model_name = "simple_cnn_large"
-    config.model.dropout_rate = 0.5
+    config.model.model_name = "dino_model"
+    config.model.dropout_rate = 0.3
+
+    config.training.optimizer = "adamw"
+    config.training.weight_decay = 1e-4
     
     config.training.num_epochs = 30
     config.training.learning_rate = 1e-4
-    
+
+    # Dataset Configuration
+
+    # Only FF
+    # config.data.dataset_mode = "single"
+    # config.data.dataset_type = "ff"
+    # config.data.dataset_root = Path("Datasets/FF")
+
+    # train_loader, val_loader, test_loader = create_ff_dataloaders(
+    #     root_dir=config.data.dataset_root,
+    #     config=config
+    # )
+
+    # Only Celeb-DF
+    # config.data.dataset_mode = "single"
+    # config.data.dataset_type = "celeb_df"
+    # config.data.dataset_root = Path("Datasets/Celeb-DF-v2")
+
+    # train_loader, val_loader, test_loader = get_dataloaders(
+    #     dataset_type="celeb_df",
+    #     root_dir="Datasets/Celeb-DF-v2",
+    #     batch_size=config.data.batch_size
+    # )
+
+    # Both
+    config.data.dataset_mode = "combined"
+    config.data.dataset_sources = [
+        DatasetSourceConfig(
+            name="ff",
+            root_dir=Path("Datasets/FF"),
+            weight=1.0,
+            enabled=True
+        ),
+        DatasetSourceConfig(
+            name="celeb_df",
+            root_dir=Path("Datasets/Celeb-DF-v2"),
+            weight=1.0,
+            enabled=True
+        ),
+    ]
+
+    train_loader, val_loader, test_loader = get_dataloaders(
+        dataset_type="combined",
+        dataset_configs=config.data.get_enabled_dataset_configs(),
+        batch_size=config.data.batch_size
+    )
+        
     print("Full pipeline configuration:")
     print(f"  Data:")
     print(f"    - Frames per video: {config.data.frames_per_video}")
@@ -177,39 +350,58 @@ def example_full_pipeline():
     print(f"    - Epochs: {config.training.num_epochs}")
     print(f"    - Learning rate: {config.training.learning_rate}")
     
-    # 1. Create preprocessing pipeline from config
-    from preprocessing import create_pipeline_from_config
-    pipeline = create_pipeline_from_config(config)
-    
-    # 2. Create dataloaders
-    from data import create_ff_dataloaders
-    train_loader, val_loader, test_loader = create_ff_dataloaders(
-        root_dir=config.data.dataset_root,
-        config=config
+    # 1. Create model
+    from models import get_model
+    config.model.dropout_rate = 0.3
+    config.model.hidden_dims = [256]
+
+    model = get_model(
+        config.model.model_name, 
+        num_classes=config.model.num_classes, 
+        dropout=config.model.dropout_rate,
+        hidden_dims=config.model.hidden_dims
     )
     
-    # 3. Create model
-    from models import get_model
-    model = get_model(config.model.model_name, num_classes=config.model.num_classes)
-    
-    # # 4. Training loop
+    # 2. Training
     from training import create_trainer
+
+    config.training.checkpoint_file_name = f"checkpoint_best_{config.model.model_name}.pt"
+
     trainer = create_trainer(config)
-    # results = trainer.train(model, train_loader, val_loader)
+    _ = trainer.train(model, train_loader, val_loader)
     
-    # 5. Evaluate on test set
-    # Load best model and evaluate
-    model = trainer.load_best_model(model)
-    test_results = trainer.evaluate(model, test_loader)
+    # 3. Evaluate on test set
+    from training import Evaluator
+
+    evaluator = Evaluator(
+        model_name=config.model.model_name,
+        weights_path=config.training.checkpoint_dir / config.training.checkpoint_file_name,
+        # dataset_name="ff",
+        dataloader=test_loader,  # uncomment if testing from the same dataset as training
+        batch_size=config.data.batch_size,
+    )
+
+    # model = trainer.load_best_model(model)
+    metrics = evaluator.evaluate()
+    
+    # Print results
+    evaluator.print_results(metrics)
 
 
 if __name__ == "__main__":
     # print("Deepfake Detection Pipeline - Usage Examples")
     # print("=" * 50)
     
+    # Single dataset examples
     # example_preprocessing()
     # example_dataset_loading()
     # example_model_creation()
+    
+    # Combined/multi-dataset examples
+    # example_combined_dataset_loading()
+    # example_combined_dataset_with_config()
+    
+    # Full pipeline example
     example_full_pipeline()
     
     print("\n" + "=" * 50)

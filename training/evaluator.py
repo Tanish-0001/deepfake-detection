@@ -51,6 +51,7 @@ class Evaluator:
         model_name: str,
         weights_path: str,
         dataset_name: str,
+        dataloader: DataLoader = None,
         batch_size: int = 32,
         num_workers: int = 0,
         device: Optional[str] = None,
@@ -92,7 +93,10 @@ class Evaluator:
         self.model = self._load_model()
         
         # Create dataset and dataloader
-        self.dataloader = self._create_dataloader()
+        if dataloader is not None:
+            self.dataloader = dataloader
+        else:
+            self.dataloader = self._create_dataloader()
     
     def _load_model(self) -> nn.Module:
         """

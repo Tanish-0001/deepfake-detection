@@ -5,7 +5,33 @@ Modify these settings to change data processing, model, or training parameters.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any, Union
+
+
+@dataclass
+class DatasetSourceConfig:
+    """
+    Configuration for a single dataset source in multi-dataset training.
+    
+    Used when training on multiple datasets (e.g., FF++ + Celeb-DF).
+    """
+    name: str  # Dataset name: 'ff', 'celeb_df', etc.
+    root_dir: Path  # Root directory of the dataset
+    weight: float = 1.0  # Sampling weight (higher = more samples)
+    enabled: bool = True  # Whether to include this dataset
+    
+    # Dataset-specific options (e.g., manipulation_types for FF++)
+    extra_kwargs: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for dataloader creation."""
+        d = {
+            "name": self.name,
+            "root_dir": str(self.root_dir),
+            "weight": self.weight,
+        }
+        d.update(self.extra_kwargs)
+        return d
 
 
 @dataclass
@@ -50,8 +76,33 @@ class PreprocessingConfig:
 class DataConfig:
     """Configuration for data preprocessing and loading."""
     
-    # Dataset paths
+    # Dataset mode: 'single' for one dataset, 'combined' for multiple
+    dataset_mode: str = "single"  # 'single', 'combined'
+    
+    # Single dataset settings (used when dataset_mode='single')
+    dataset_type: str = "ff"  # 'ff', 'celeb_df'
     dataset_root: Path = Path("Datasets/FF")
+    
+    # Multi-dataset settings (used when dataset_mode='combined')
+    # List of dataset sources to combine for training
+    dataset_sources: List[DatasetSourceConfig] = field(default_factory=lambda: [
+        DatasetSourceConfig(
+            name="ff",
+            root_dir=Path("Datasets/FF"),
+            weight=1.0,
+            extra_kwargs={"manipulation_types": ["Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures", "FaceShifter"]}
+        ),
+        DatasetSourceConfig(
+            name="celeb_df",
+            root_dir=Path("Datasets/Celeb-DF-v2"),
+            weight=1.0
+        )
+    ])
+    
+    # Whether to use dataset weights for sampling in combined mode
+    use_dataset_weights: bool = False
+    
+    # Legacy single-dataset paths (kept for backward compatibility)
     train_json: str = "train.json"
     val_json: str = "val.json"
     test_json: str = "test.json"
@@ -94,6 +145,14 @@ class DataConfig:
     num_workers: int = 0  # 0 is optimal when preload_cache=True (data already in RAM)
     pin_memory: bool = True
     prefetch_factor: int = 2  # Number of batches to prefetch per worker
+    
+    def get_enabled_dataset_configs(self) -> List[Dict[str, Any]]:
+        """Get list of enabled dataset configs for combined dataloader."""
+        return [
+            source.to_dict() 
+            for source in self.dataset_sources 
+            if source.enabled
+        ]
 
 
 @dataclass
@@ -127,6 +186,8 @@ class TrainingConfig:
     num_epochs: int = 25
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
+
+    unfreeze_backbone: bool = False
     
     # Optimizer
     optimizer: str = "adam"  # 'adam', 'adamw', 'sgd'
@@ -141,8 +202,9 @@ class TrainingConfig:
     early_stopping_patience: int = 10
     
     # Checkpointing
-    checkpoint_dir: Path = Path("checkpoints")
+    checkpoint_dir: Path = Path("checkpoints/deepfake_detection")
     save_best_only: bool = True
+    checkpoint_file_name: str = "checkpoint_best.pt"
     
     # Logging
     log_dir: Path = Path("logs")

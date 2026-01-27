@@ -133,18 +133,29 @@ class Trainer:
             'seed': self.config.seed
         })
     
-    def _create_optimizer(self, model: nn.Module) -> optim.Optimizer:
+    def _create_optimizer(self, model: nn.Module, unfreeze_backbone: bool = False) -> optim.Optimizer:
         """Create optimizer based on configuration."""
         optimizer_name = self.training_config.optimizer.lower()
         lr = self.training_config.learning_rate
         weight_decay = self.training_config.weight_decay
+
+        if unfreeze_backbone:
+            parameters = [
+                {"params": model.get_backbone_params(), "lr": 1e-5},
+                {"params": model.classifier.parameters(), "lr": lr},
+            ]
+        else:
+            parameters = [
+                {"params": model.classifier.parameters(), "lr": lr},
+            ]
+
         
         if optimizer_name == "adam":
-            return optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+            return optim.Adam(parameters, weight_decay=weight_decay)
         elif optimizer_name == "adamw":
-            return optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+            return optim.AdamW(parameters, weight_decay=weight_decay)
         elif optimizer_name == "sgd":
-            return optim.SGD(model.parameters(), lr=lr, weight_decay=weight_decay, momentum=0.9)
+            return optim.SGD(parameters, weight_decay=weight_decay, momentum=0.9)
         else:
             raise ValueError(f"Unknown optimizer: {optimizer_name}")
     
@@ -223,7 +234,20 @@ class Trainer:
         
         for epoch in range(self.current_epoch, self.training_config.num_epochs):
             self.current_epoch = epoch
-            
+
+            if self.training_config.unfreeze_backbone and epoch == (self.training_config.num_epochs // 2):
+                print("\nUnfreezing backbone for fine-tuning.")
+                model.unfreeze_backbone()
+                remaining_steps = (self.training_config.num_epochs - epoch) * len(train_loader)
+
+                optimizer = self._create_optimizer(model, unfreeze_backbone=True)
+                optimizer.zero_grad(set_to_none=True)
+
+                scheduler = self._create_scheduler(
+                    optimizer,
+                    num_training_steps=remaining_steps
+                )
+                            
             # Training phase
             train_loss, train_acc = self._train_epoch(
                 model, train_loader, optimizer, criterion, scheduler
@@ -243,7 +267,7 @@ class Trainer:
             self.history['learning_rates'].append(current_lr)
             
             # Update scheduler if using ReduceLROnPlateau
-            if scheduler is not None and self.training_config.scheduler.lower() == "plateau":
+            if scheduler is not None and self.training_config.scheduler.lower() in ["plateau", "step"]:
                 scheduler.step(val_loss)
             
             # Print progress
@@ -317,7 +341,9 @@ class Trainer:
         correct = 0
         total = 0
         
-        for batch_idx, (inputs, targets) in tqdm(enumerate(train_loader), total=len(train_loader), file=sys.stdout, dynamic_ncols=True):
+        pbar = tqdm(train_loader, total=len(train_loader), file=sys.stdout, dynamic_ncols=True)
+
+        for inputs, targets in pbar:
             inputs = inputs.to(self.device)
             targets = targets.to(self.device)
             
@@ -340,7 +366,7 @@ class Trainer:
                 optimizer.step()
             
             # Update scheduler (except for ReduceLROnPlateau)
-            if scheduler is not None and self.training_config.scheduler.lower() not in ["plateau", "none"]:
+            if scheduler is not None and self.training_config.scheduler.lower() not in ["plateau", "step", "none"]:
                 scheduler.step()
             
             # Calculate metrics
@@ -350,10 +376,10 @@ class Trainer:
             correct += predicted.eq(targets).sum().item()
             
             # Log progress
-            if (batch_idx + 1) % self.training_config.log_interval == 0:
-                batch_acc = 100. * correct / total
-                print(f"  Batch [{batch_idx+1}/{len(train_loader)}] "
-                      f"Loss: {loss.item():.4f}, Acc: {batch_acc:.2f}%", end='\r')
+            pbar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'acc': f'{100. * correct / total:.2f}%'
+            })
         
         avg_loss = total_loss / len(train_loader)
         accuracy = correct / total
@@ -489,7 +515,7 @@ class Trainer:
         
         # Save best checkpoint
         if is_best:
-            best_path = self.checkpoint_dir / "checkpoint_best.pt"
+            best_path = self.checkpoint_dir / self.training_config.checkpoint_file_name
             torch.save(checkpoint, best_path)
         
         # Optionally save epoch checkpoint
@@ -538,7 +564,7 @@ class Trainer:
         Returns:
             Model with loaded weights
         """
-        best_path = self.checkpoint_dir / "checkpoint_best.pt"
+        best_path = self.checkpoint_dir / self.training_config.checkpoint_file_name
         
         if not best_path.exists():
             raise FileNotFoundError(f"No best checkpoint found at {best_path}")

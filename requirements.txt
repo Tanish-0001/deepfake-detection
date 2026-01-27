@@ -8,6 +8,7 @@ Pillow>=8.0.0
 # Deep learning framework
 torch==2.9.1+cu126
 torchvision==0.24.1+cu126
+scikit-learn==1.7.2
 
 # Face detection
 retina-face>=0.0.13
@@ -16,12 +17,3 @@ retina-face>=0.0.13
 
 # Progress bars and utilities
 tqdm>=4.62.0
-
-# Optional: For advanced models
-# timm>=0.5.0  # For EfficientNet, ViT, etc.
-# facenet-pytorch>=2.5.0  # For MTCNN face detection
-
-# Development dependencies (optional)
-# pytest>=6.0.0
-# black>=21.0.0
-# flake8>=3.9.0
