@@ -330,11 +330,11 @@ def example_full_pipeline():
         ),
     ]
 
-    train_loader, val_loader, test_loader = get_dataloaders(
-        dataset_type="combined",
-        dataset_configs=config.data.get_enabled_dataset_configs(),
-        batch_size=config.data.batch_size
-    )
+    # train_loader, val_loader, test_loader = get_dataloaders(
+    #     dataset_type="combined",
+    #     dataset_configs=config.data.get_enabled_dataset_configs(),
+    #     batch_size=config.data.batch_size
+    # )
         
     print("Full pipeline configuration:")
     print(f"  Data:")
@@ -368,17 +368,18 @@ def example_full_pipeline():
     config.training.checkpoint_file_name = f"checkpoint_best_{config.model.model_name}.pt"
 
     trainer = create_trainer(config)
-    _ = trainer.train(model, train_loader, val_loader)
+    # _ = trainer.train(model, train_loader, val_loader)
     
     # 3. Evaluate on test set
     from training import Evaluator
 
     evaluator = Evaluator(
         model_name=config.model.model_name,
-        weights_path=config.training.checkpoint_dir / config.training.checkpoint_file_name,
-        # dataset_name="ff",
-        dataloader=test_loader,  # uncomment if testing from the same dataset as training
+        weights_path=config.training.checkpoint_dir / config.experiment_name / config.training.checkpoint_file_name,
+        dataset_name="combined",
+        # dataloader=test_loader,  # uncomment if testing from the same dataset as training
         batch_size=config.data.batch_size,
+        config=config
     )
 
     # model = trainer.load_best_model(model)

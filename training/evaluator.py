@@ -37,6 +37,7 @@ except ImportError:
     SKLEARN_AVAILABLE = False
 
 from tqdm import tqdm
+from data import get_dataloaders
 
 
 class Evaluator:
@@ -50,12 +51,13 @@ class Evaluator:
         self,
         model_name: str,
         weights_path: str,
-        dataset_name: str,
+        dataset_name: str = "ff",
         dataloader: DataLoader = None,
         batch_size: int = 32,
         num_workers: int = 0,
         device: Optional[str] = None,
-        video_level: bool = False
+        video_level: bool = False,
+        config = None
     ):
         """
         Initialize the evaluator.
@@ -80,6 +82,8 @@ class Evaluator:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.video_level = video_level
+
+        self.config = config
         
         # Setup device
         if device is None:
@@ -152,42 +156,16 @@ class Evaluator:
         Returns:
             DataLoader for the test set
         """
-        from preprocessing.transforms import get_val_transforms, TransformConfig
-        
-        transform = get_val_transforms(TransformConfig())
-        
-        if self.dataset_name == 'ff':
-            dataset = self._create_ff_dataset(transform)
-        elif self.dataset_name in ['celeb_df', 'celebdf', 'celeb-df']:
-            dataset = self._create_celeb_df_dataset(transform)
-        else:
-            raise ValueError(f"Unknown dataset: {self.dataset_name}. "
-                           f"Supported datasets: 'ff', 'celeb_df'")
-        
-        print(f"Dataset size: {len(dataset)} samples")
-        
-        # Count labels
-        if hasattr(dataset, 'labels'):
-            labels = dataset.labels
-            if hasattr(dataset, 'sample_index'):
-                # Frame-level dataset - expand labels
-                labels = [dataset.labels[vid_idx] for vid_idx, _ in dataset.sample_index]
-            
-            real_count = sum(1 for l in labels if l == 0)
-            fake_count = sum(1 for l in labels if l == 1)
-            print(f"  Real samples: {real_count}")
-            print(f"  Fake samples: {fake_count}")
-        
-        dataloader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
+
+        test_loader = get_dataloaders(
+            dataset_type=self.dataset_name,
+            dataset_configs=self.config.data.get_enabled_dataset_configs(),
+            batch_size=self.config.data.batch_size,
             num_workers=self.num_workers,
-            pin_memory=True if self.device.type == 'cuda' else False,
-            drop_last=False
-        )
-        
-        return dataloader
+            test_only=True
+        )[0]
+
+        return test_loader
     
     def _create_ff_dataset(self, transform):
         """Create FaceForensics++ dataset."""

@@ -289,9 +289,8 @@ class Trainer:
             # Save checkpoint
             if improved:
                 self.epochs_without_improvement = 0
-                if self.training_config.save_best_only:
-                    self._save_checkpoint(model, optimizer, scheduler, is_best=True)
-                    print(f"  ✓ New best model saved (Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f})")
+                self._save_checkpoint(model, optimizer, scheduler, is_best=True)
+                print(f"  ✓ New best model saved (Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f})")
             else:
                 self.epochs_without_improvement += 1
             

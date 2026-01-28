@@ -397,7 +397,8 @@ def create_combined_dataloaders(
     preload_cache: bool = True,
     use_dataset_weights: bool = False,
     pin_memory: bool = True,
-    config=None
+    config=None,
+    test_only: bool = False
 ) -> Tuple:
     """
     Create DataLoaders for combined multi-dataset training.
@@ -419,7 +420,7 @@ def create_combined_dataloaders(
         use_dataset_weights: If True, use dataset weights for sampling
         pin_memory: Whether to pin memory for GPU
         config: Optional configuration object
-        
+        test_only: Whether to create only test dataloader (skip train and val)
     Returns:
         Tuple of (train_loader, val_loader, test_loader)
         
@@ -450,30 +451,31 @@ def create_combined_dataloaders(
     
     print(f"\nCreating combined datasets from {len(dataset_configs)} sources...")
     
-    # Create combined datasets for each split
-    print("\n--- Training Set ---")
-    train_dataset = create_combined_dataset(
-        dataset_configs=dataset_configs,
-        split="train",
-        frames_per_video=frames_per_video,
-        transform=train_transform,
-        video_level=video_level,
-        use_cache=use_cache,
-        require_cache=require_cache,
-        preload_cache=preload_cache
-    )
-    
-    print("\n--- Validation Set ---")
-    val_dataset = create_combined_dataset(
-        dataset_configs=dataset_configs,
-        split="val",
-        frames_per_video=frames_per_video,
-        transform=val_transform,
-        video_level=video_level,
-        use_cache=use_cache,
-        require_cache=require_cache,
-        preload_cache=preload_cache
-    )
+    if not test_only:
+        # Create combined datasets for each split
+        print("\n--- Training Set ---")
+        train_dataset = create_combined_dataset(
+            dataset_configs=dataset_configs,
+            split="train",
+            frames_per_video=frames_per_video,
+            transform=train_transform,
+            video_level=video_level,
+            use_cache=use_cache,
+            require_cache=require_cache,
+            preload_cache=preload_cache
+        )
+        
+        print("\n--- Validation Set ---")
+        val_dataset = create_combined_dataset(
+            dataset_configs=dataset_configs,
+            split="val",
+            frames_per_video=frames_per_video,
+            transform=val_transform,
+            video_level=video_level,
+            use_cache=use_cache,
+            require_cache=require_cache,
+            preload_cache=preload_cache
+        )
     
     print("\n--- Test Set ---")
     test_dataset = create_combined_dataset(
@@ -487,60 +489,62 @@ def create_combined_dataloaders(
         preload_cache=preload_cache
     )
     
-    # Print combined stats
-    print("\n--- Combined Dataset Statistics ---")
-    for split_name, dataset in [("Train", train_dataset), ("Val", val_dataset), ("Test", test_dataset)]:
-        stats = dataset.get_dataset_stats()
-        print(f"\n{split_name}:")
-        for name, s in stats.items():
-            print(f"  {name}: {s['total_samples']} samples, {s['num_videos']} videos "
+    if not test_only:
+        # Print combined stats
+        print("\n--- Combined Dataset Statistics ---")
+        for split_name, dataset in [("Train", train_dataset), ("Val", val_dataset), ("Test", test_dataset)]:
+            stats = dataset.get_dataset_stats()
+            print(f"\n{split_name}:")
+            for name, s in stats.items():
+                print(f"  {name}: {s['total_samples']} samples, {s['num_videos']} videos "
                   f"(Real: {s['real_count']}, Fake: {s['fake_count']}, weight: {s['weight']})")
     
     # Use spawn multiprocessing context
     import multiprocessing
     mp_context = 'spawn' if num_workers > 0 else None
     
-    # Create weighted sampler for training
-    train_sampler = None
-    shuffle_train = True
-    
-    # Get weights for sampling
-    if use_dataset_weights:
-        # Use both class balance and dataset weights
-        class_weights = train_dataset.get_class_balanced_weights()
-        dataset_weights = train_dataset.get_dataset_weights()
-        weights = [c * d for c, d in zip(class_weights, dataset_weights)]
-    else:
-        # Only use class balance weights
-        weights = train_dataset.get_class_balanced_weights()
-    
-    train_sampler = WeightedRandomSampler(
-        weights=weights,
-        num_samples=len(weights),
-        replacement=True
-    )
-    shuffle_train = False
-    
-    # Create dataloaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=shuffle_train,
-        sampler=train_sampler,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=True,
-        multiprocessing_context=mp_context
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        multiprocessing_context=mp_context
-    )
+    if not test_only:
+        # Create weighted sampler for training
+        train_sampler = None
+        shuffle_train = True
+        
+        # Get weights for sampling
+        if use_dataset_weights:
+            # Use both class balance and dataset weights
+            class_weights = train_dataset.get_class_balanced_weights()
+            dataset_weights = train_dataset.get_dataset_weights()
+            weights = [c * d for c, d in zip(class_weights, dataset_weights)]
+        else:
+            # Only use class balance weights
+            weights = train_dataset.get_class_balanced_weights()
+        
+        train_sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(weights),
+            replacement=True
+        )
+        shuffle_train = False
+        
+        # Create dataloaders
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=shuffle_train,
+            sampler=train_sampler,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=True,
+            multiprocessing_context=mp_context
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            multiprocessing_context=mp_context
+        )
     
     test_loader = DataLoader(
         test_dataset,
@@ -551,7 +555,10 @@ def create_combined_dataloaders(
         multiprocessing_context=mp_context
     )
     
-    return train_loader, val_loader, test_loader
+    if not test_only:
+        return train_loader, val_loader, test_loader
+    
+    return (test_loader,)
 
 
 def get_dataloaders(

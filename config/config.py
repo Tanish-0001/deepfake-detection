@@ -202,8 +202,8 @@ class TrainingConfig:
     early_stopping_patience: int = 10
     
     # Checkpointing
-    checkpoint_dir: Path = Path("checkpoints/deepfake_detection")
-    save_best_only: bool = True
+    checkpoint_dir: Path = Path("checkpoints")
+    save_best_only: bool = False
     checkpoint_file_name: str = "checkpoint_best.pt"
     
     # Logging
