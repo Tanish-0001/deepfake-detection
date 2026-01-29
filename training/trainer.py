@@ -139,15 +139,29 @@ class Trainer:
         lr = self.training_config.learning_rate
         weight_decay = self.training_config.weight_decay
 
-        if unfreeze_backbone:
-            parameters = [
-                {"params": model.get_backbone_params(), "lr": 1e-5},
-                {"params": model.classifier.parameters(), "lr": lr},
-            ]
-        else:
-            parameters = [
-                {"params": model.classifier.parameters(), "lr": lr},
-            ]
+        # Build parameter groups based on model type
+        parameters = []
+        
+        if unfreeze_backbone and hasattr(model, 'get_backbone_params'):
+            parameters.append({"params": model.get_backbone_params(), "lr": 1e-5})
+        
+        # Add temporal transformer parameters if present (for DinoTemporalModel)
+        if hasattr(model, 'get_temporal_params'):
+            parameters.append({"params": model.get_temporal_params(), "lr": lr})
+        
+        # Add other temporal model components (cls_token, positional_encoding, feature_projection)
+        if hasattr(model, 'cls_token'):
+            parameters.append({"params": [model.cls_token], "lr": lr})
+        if hasattr(model, 'positional_encoding'):
+            parameters.append({"params": [model.positional_encoding], "lr": lr})
+        if hasattr(model, 'feature_projection') and hasattr(model.feature_projection, 'parameters'):
+            # Only add if it's not Identity
+            proj_params = list(model.feature_projection.parameters())
+            if proj_params:
+                parameters.append({"params": proj_params, "lr": lr})
+        
+        # Add classifier parameters
+        parameters.append({"params": model.classifier.parameters(), "lr": lr})
 
         
         if optimizer_name == "adam":
@@ -188,8 +202,36 @@ class Trainer:
         else:
             raise ValueError(f"Unknown scheduler: {scheduler_name}")
     
-    def _create_criterion(self) -> nn.Module:
-        """Create loss function."""
+    def _create_criterion(self, train_loader: DataLoader = None) -> nn.Module:
+        """
+        Create loss function, optionally with class weights for imbalanced data.
+        
+        Args:
+            train_loader: Training dataloader to compute class weights from
+            
+        Returns:
+            CrossEntropyLoss with or without class weights
+        """
+        if self.training_config.use_class_weights and train_loader is not None:
+            # Count samples per class
+            labels = train_loader.dataset.labels
+            num_real = labels.count(0)
+            num_fake = labels.count(1)
+            total = num_real + num_fake
+            
+            # Weight inversely proportional to class frequency
+            # More weight to minority class
+            weights = torch.tensor([
+                num_fake / total,  # weight for Real (0) - minority gets higher weight
+                num_real / total,  # weight for Fake (1)
+            ], device=self.device)
+            
+            print(f"Using class-weighted loss:")
+            print(f"  Real (0): {num_real} samples, weight={weights[0]:.4f}")
+            print(f"  Fake (1): {num_fake} samples, weight={weights[1]:.4f}")
+            
+            return nn.CrossEntropyLoss(weight=weights)
+        
         return nn.CrossEntropyLoss()
     
     def train(
@@ -197,7 +239,7 @@ class Trainer:
         model: nn.Module,
         train_loader: DataLoader,
         val_loader: DataLoader,
-        resume_from: Optional[str] = None
+        resume_from: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Train the model.
@@ -207,7 +249,6 @@ class Trainer:
             train_loader: DataLoader for training data
             val_loader: DataLoader for validation data
             resume_from: Path to checkpoint to resume from (optional)
-        
         Returns:
             Dictionary containing training history and best metrics
         """
@@ -218,7 +259,7 @@ class Trainer:
         optimizer = self._create_optimizer(model)
         num_training_steps = len(train_loader) * self.training_config.num_epochs
         scheduler = self._create_scheduler(optimizer, num_training_steps)
-        criterion = self._create_criterion()
+        criterion = self._create_criterion(train_loader)
         
         # Resume from checkpoint if specified
         if resume_from:
@@ -518,7 +559,7 @@ class Trainer:
             torch.save(checkpoint, best_path)
         
         # Optionally save epoch checkpoint
-        if not self.training_config.save_best_only:
+        if self.training_config.save_individual_epoch:
             epoch_path = self.checkpoint_dir / f"checkpoint_epoch_{self.current_epoch+1}.pt"
             torch.save(checkpoint, epoch_path)
     

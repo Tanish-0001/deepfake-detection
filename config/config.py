@@ -192,6 +192,9 @@ class TrainingConfig:
     # Optimizer
     optimizer: str = "adam"  # 'adam', 'adamw', 'sgd'
     
+    # Loss function
+    use_class_weights: bool = True  # Use class-weighted loss for imbalanced data
+    
     # Learning rate scheduler
     scheduler: str = "cosine"  # 'cosine', 'step', 'plateau', 'none'
     scheduler_patience: int = 5
@@ -203,7 +206,7 @@ class TrainingConfig:
     
     # Checkpointing
     checkpoint_dir: Path = Path("checkpoints")
-    save_best_only: bool = False
+    save_individual_epoch: bool = False
     checkpoint_file_name: str = "checkpoint_best.pt"
     
     # Logging

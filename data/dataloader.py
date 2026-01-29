@@ -36,7 +36,8 @@ def create_dataloaders(
     num_workers: int = 4,
     pin_memory: bool = True,
     use_weighted_sampler: bool = True,
-    persistent_workers: bool = False
+    persistent_workers: bool = False,
+    collate_fn=None
 ) -> Tuple:
     """
     Create DataLoaders for training, validation, and optionally test sets.
@@ -50,6 +51,7 @@ def create_dataloaders(
         pin_memory: Whether to pin memory for GPU
         use_weighted_sampler: Whether to use weighted sampling for imbalanced data
         persistent_workers: Whether to keep workers alive between epochs
+        collate_fn: Custom collate function (use video_collate_fn for video-level datasets)
         
     Returns:
         Tuple of (train_loader, val_loader) or (train_loader, val_loader, test_loader)
@@ -100,7 +102,8 @@ def create_dataloaders(
         pin_memory=pin_memory,
         drop_last=True,
         multiprocessing_context=mp_context,
-        persistent_workers=use_persistent
+        persistent_workers=use_persistent,
+        collate_fn=collate_fn
     )
     
     val_loader = DataLoader(
@@ -110,7 +113,8 @@ def create_dataloaders(
         num_workers=num_workers,
         pin_memory=pin_memory,
         multiprocessing_context=mp_context,
-        persistent_workers=use_persistent
+        persistent_workers=use_persistent,
+        collate_fn=collate_fn
     )
     
     if test_dataset is not None:
@@ -121,7 +125,8 @@ def create_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             multiprocessing_context=mp_context,
-            persistent_workers=use_persistent
+            persistent_workers=use_persistent,
+            collate_fn=collate_fn
         )
         return train_loader, val_loader, test_loader
     
@@ -139,7 +144,8 @@ def create_ff_dataloaders(
     config=None,
     use_cache: bool = True,
     require_cache: bool = True,
-    preload_cache: bool = True
+    preload_cache: bool = True,
+    collate_fn=None
 ) -> Tuple:
     """
     Create DataLoaders for FaceForensics++ dataset.
@@ -249,13 +255,18 @@ def create_ff_dataloaders(
         preload_cache=preload_cache
     )
     
+    # Auto-use video_collate_fn for video-level datasets if not specified
+    if video_level and collate_fn is None:
+        collate_fn = video_collate_fn
+    
     # Create dataloaders
     return create_dataloaders(
         train_dataset,
         val_dataset,
         test_dataset,
         batch_size=batch_size,
-        num_workers=num_workers
+        num_workers=num_workers,
+        collate_fn=collate_fn
     )
 
 
@@ -287,7 +298,8 @@ def create_celeb_df_dataloaders(
     config=None,
     use_cache: bool = True,
     require_cache: bool = True,
-    preload_cache: bool = True
+    preload_cache: bool = True,
+    collate_fn=None
 ) -> Tuple:
     """
     Create DataLoaders for Celeb-DF-v2 dataset.
@@ -377,12 +389,17 @@ def create_celeb_df_dataloaders(
         preload_cache=preload_cache
     )
     
+    # Auto-use video_collate_fn for video-level datasets if not specified
+    if video_level and collate_fn is None:
+        collate_fn = video_collate_fn
+    
     return create_dataloaders(
         train_dataset,
         val_dataset,
         test_dataset,
         batch_size=batch_size,
-        num_workers=num_workers
+        num_workers=num_workers,
+        collate_fn=collate_fn
     )
 
 
@@ -398,7 +415,8 @@ def create_combined_dataloaders(
     use_dataset_weights: bool = False,
     pin_memory: bool = True,
     config=None,
-    test_only: bool = False
+    test_only: bool = False,
+    collate_fn=None
 ) -> Tuple:
     """
     Create DataLoaders for combined multi-dataset training.
@@ -499,6 +517,10 @@ def create_combined_dataloaders(
                 print(f"  {name}: {s['total_samples']} samples, {s['num_videos']} videos "
                   f"(Real: {s['real_count']}, Fake: {s['fake_count']}, weight: {s['weight']})")
     
+    # Auto-use video_collate_fn for video-level datasets if not specified
+    if video_level and collate_fn is None:
+        collate_fn = video_collate_fn
+    
     # Use spawn multiprocessing context
     import multiprocessing
     mp_context = 'spawn' if num_workers > 0 else None
@@ -534,7 +556,8 @@ def create_combined_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=True,
-            multiprocessing_context=mp_context
+            multiprocessing_context=mp_context,
+            collate_fn=collate_fn
         )
         
         val_loader = DataLoader(
@@ -543,7 +566,8 @@ def create_combined_dataloaders(
             shuffle=False,
             num_workers=num_workers,
             pin_memory=pin_memory,
-            multiprocessing_context=mp_context
+            multiprocessing_context=mp_context,
+            collate_fn=collate_fn
         )
     
     test_loader = DataLoader(
@@ -552,7 +576,8 @@ def create_combined_dataloaders(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        multiprocessing_context=mp_context
+        multiprocessing_context=mp_context,
+        collate_fn=collate_fn
     )
     
     if not test_only:
@@ -573,6 +598,7 @@ def get_dataloaders(
     require_cache: bool = True,
     preload_cache: bool = True,
     config=None,
+    collate_fn=None,
     **kwargs
 ) -> Tuple:
     """
@@ -630,6 +656,7 @@ def get_dataloaders(
             require_cache=require_cache,
             preload_cache=preload_cache,
             config=config,
+            collate_fn=collate_fn,
             **kwargs
         )
     
@@ -646,6 +673,7 @@ def get_dataloaders(
             require_cache=require_cache,
             preload_cache=preload_cache,
             config=config,
+            collate_fn=collate_fn,
             **kwargs
         )
     
@@ -662,6 +690,7 @@ def get_dataloaders(
             require_cache=require_cache,
             preload_cache=preload_cache,
             config=config,
+            collate_fn=collate_fn,
             **kwargs
         )
     

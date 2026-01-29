@@ -57,7 +57,8 @@ class Evaluator:
         num_workers: int = 0,
         device: Optional[str] = None,
         video_level: bool = False,
-        config = None
+        config = None,
+        model_kwargs: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize the evaluator.
@@ -70,6 +71,8 @@ class Evaluator:
             num_workers: Number of data loading workers
             device: Device to use ('cuda', 'cpu', or None for auto-detect)
             video_level: Whether to use video-level evaluation
+            config: Configuration object
+            model_kwargs: Additional keyword arguments for model creation (e.g., max_seq_length)
         """
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch is required for evaluation")
@@ -82,6 +85,7 @@ class Evaluator:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.video_level = video_level
+        self.model_kwargs = model_kwargs or {}
 
         self.config = config
         
@@ -111,9 +115,11 @@ class Evaluator:
         """
         from models import get_model
         
-        # Create model
+        # Create model with kwargs
         print(f"Loading model: {self.model_name}")
-        model = get_model(self.model_name)
+        if self.model_kwargs:
+            print(f"Model kwargs: {self.model_kwargs}")
+        model = get_model(self.model_name, **self.model_kwargs)
         
         # Load weights
         if not self.weights_path.exists():
