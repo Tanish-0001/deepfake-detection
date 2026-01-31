@@ -23,12 +23,12 @@ def create_pipeline_from_config(config):
     """Create a PreprocessingPipeline from a configuration object."""
     
     return PreprocessingPipeline(
-        num_frames=config.data.frames_per_video,
-        sampling_strategy=config.data.frame_sampling_strategy,
-        face_detector=config.data.face_detector,
-        detection_threshold=config.data.face_detection_threshold,
-        output_size=config.data.output_size,
-        bbox_enlargement=config.data.bbox_enlargement_factor,
+        num_frames=config.preprocessing.frames_per_video,
+        sampling_strategy=config.preprocessing.frame_sampling_strategy,
+        face_detector=config.preprocessing.face_detector,
+        detection_threshold=config.preprocessing.face_detection_threshold,
+        output_size=config.preprocessing.output_size,
+        bbox_enlargement=config.preprocessing.bbox_enlargement_factor,
         align_faces=True,
         device=config.training.device,
         seed=config.seed

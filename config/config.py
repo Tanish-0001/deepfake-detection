@@ -107,10 +107,6 @@ class DataConfig:
     val_json: str = "val.json"
     test_json: str = "test.json"
     
-    # Frame sampling (legacy - use preprocessing config for new projects)
-    frames_per_video: int = 10
-    frame_sampling_strategy: str = "uniform"  # 'uniform', 'random', 'first_n'
-    
     # Face extraction (legacy - use preprocessing config for new projects)
     face_detector: str = "retinaface"  # 'retinaface', 'mtcnn', 'dlib'
     face_detection_threshold: float = 0.9
@@ -168,14 +164,10 @@ class ModelConfig:
     
     # Model architecture (for simple_cnn)
     num_classes: int = 2  # Binary classification: real vs fake
-    dropout_rate: float = 0.5
+    dropout_rate: float = 0.3
     
     # Feature dimensions
     hidden_dims: List[int] = field(default_factory=lambda: [64, 128, 256, 512])
-    
-    # Pretrained weights (for transfer learning models)
-    pretrained: bool = True
-    freeze_backbone: bool = False
 
 
 @dataclass
@@ -187,8 +179,11 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
 
-    unfreeze_backbone: bool = False
+    unfreeze_backbone: bool = False  # Unfreeze backbone for fine-tuning
+    unfreeze_backbone_after_epochs: int = 15  # Number of epochs after which to unfreeze backbone
     
+    resume_training_best: bool = False
+
     # Optimizer
     optimizer: str = "adam"  # 'adam', 'adamw', 'sgd'
     

@@ -57,7 +57,7 @@ from config import Config, DataConfig, ModelConfig
 config = Config()
 
 # Or customize
-config.data.frames_per_video = 15
+config.preprocessing.frames_per_video = 15
 config.data.batch_size = 64
 config.model.dropout_rate = 0.3
 ```

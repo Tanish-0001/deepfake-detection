@@ -2,9 +2,9 @@
 Celeb-DF-v2 Dataset implementation.
 
 Loads data from the Celeb-DF-v2 dataset structure.
-- Celeb-real: Real celebrity videos (label 1)
-- Celeb-synthesis: Fake deepfake videos (label 0)  
-- YouTube-real: Real YouTube videos (label 1)
+- Celeb-real: Real celebrity videos
+- Celeb-synthesis: Fake deepfake videos
+- YouTube-real: Real YouTube videos
 
 The dataset uses List_of_testing_videos.txt for official test split.
 Remaining videos are used for training and validation.
@@ -503,7 +503,7 @@ def get_celeb_df_dataset(
     
     # Override with config if provided
     if config is not None:
-        frames_per_video = config.data.frames_per_video
+        frames_per_video = config.preprocessing.frames_per_video
     
     # Get transforms
     transform_config = TransformConfig()

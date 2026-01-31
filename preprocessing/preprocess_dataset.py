@@ -414,11 +414,11 @@ def create_preprocessor_from_config(config: Config) -> DatasetPreprocessor:
     return DatasetPreprocessor(
         dataset_root=config.data.dataset_root,
         cache_dir=config.data.dataset_root / "cache",
-        frames_per_video=config.data.frames_per_video,
-        output_size=config.data.output_size,
-        bbox_enlargement=config.data.bbox_enlargement_factor,
-        face_detector=config.data.face_detector,
-        detection_threshold=config.data.face_detection_threshold,
+        frames_per_video=config.preprocessing.frames_per_video,
+        output_size=config.preprocessing.output_size,
+        bbox_enlargement=config.preprocessing.bbox_enlargement_factor,
+        face_detector=config.preprocessing.face_detector,
+        detection_threshold=config.preprocessing.face_detection_threshold,
         device=config.training.device,
         compression=config.data.compression
     )
@@ -488,11 +488,11 @@ Examples:
     
     # Override with command line arguments
     if args.frames:
-        config.data.frames_per_video = args.frames
+        config.preprocessing.frames_per_video = args.frames
     if args.output_size:
-        config.data.output_size = (args.output_size, args.output_size)
+        config.preprocessing.output_size = (args.output_size, args.output_size)
     if args.bbox_enlarge:
-        config.data.bbox_enlargement_factor = args.bbox_enlarge
+        config.preprocessing.bbox_enlargement_factor = args.bbox_enlarge
     if args.device:
         config.training.device = args.device
     if args.dataset_root:
@@ -504,20 +504,20 @@ Examples:
     preprocessor = DatasetPreprocessor(
         dataset_root=config.data.dataset_root,
         cache_dir=cache_dir,
-        frames_per_video=config.data.frames_per_video,
-        output_size=config.data.output_size,
-        bbox_enlargement=config.data.bbox_enlargement_factor,
-        face_detector=config.data.face_detector,
-        detection_threshold=config.data.face_detection_threshold,
+        frames_per_video=config.preprocessing.frames_per_video,
+        output_size=config.preprocessing.output_size,
+        bbox_enlargement=config.preprocessing.bbox_enlargement_factor,
+        face_detector=config.preprocessing.face_detector,
+        detection_threshold=config.preprocessing.face_detection_threshold,
         device=config.training.device,
         compression=config.data.compression
     )
     
     print(f"Dataset root: {config.data.dataset_root}")
     print(f"Cache directory: {cache_dir}")
-    print(f"Frames per video: {config.data.frames_per_video}")
-    print(f"Output size: {config.data.output_size}")
-    print(f"BBox enlargement: {config.data.bbox_enlargement_factor}")
+    print(f"Frames per video: {config.preprocessing.frames_per_video}")
+    print(f"Output size: {config.preprocessing.output_size}")
+    print(f"BBox enlargement: {config.preprocessing.bbox_enlargement_factor}")
     print(f"Device: {config.training.device}")
     
     if args.verify:

@@ -536,7 +536,7 @@ def get_ff_dataset(
     if config is not None:
         manipulation_types = config.data.manipulation_types
         compression = config.data.compression
-        frames_per_video = config.data.frames_per_video
+        frames_per_video = config.preprocessing.frames_per_video
     
     # Get transforms
     transform_config = TransformConfig()

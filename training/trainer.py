@@ -12,16 +12,14 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, Callable
 from dataclasses import asdict
 from tqdm import tqdm
+import numpy as np
 
-try:
-    import torch
-    import torch.nn as nn
-    import torch.optim as optim
-    from torch.utils.data import DataLoader
-    from torch.cuda.amp import GradScaler, autocast
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torch.amp import GradScaler, autocast
+from sklearn.metrics import classification_report
 
 
 class Trainer:
@@ -44,8 +42,6 @@ class Trainer:
         Args:
             config: Config object containing training, data, and model configurations
         """
-        if not TORCH_AVAILABLE:
-            raise ImportError("PyTorch is required for training. Install with: pip install torch")
         
         self.config = config
         self.training_config = config.training
@@ -71,8 +67,8 @@ class Trainer:
         # Mixed precision scaler
         self.scaler = GradScaler() if self.training_config.mixed_precision and self.device.type == 'cuda' else None
         
-        # Setup logging
-        self._setup_logging()
+        # Save config
+        self._save_config()
         
         # Set random seed for reproducibility
         self._set_seed(config.seed)
@@ -98,40 +94,13 @@ class Trainer:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
     
-    def _setup_logging(self):
-        """Setup logging directory and files."""
-        self.log_dir = Path(self.training_config.log_dir) / self.config.experiment_name
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.checkpoint_dir = Path(self.training_config.checkpoint_dir) / self.config.experiment_name
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
+    def _save_config(self):
         # Save config
-        config_path = self.log_dir / "config.json"
+        config_path = self.training_config.log_dir / "config.json"
         with open(config_path, 'w') as f:
-            json.dump(self._config_to_dict(), f, indent=2, default=str)
-    
-    def _config_to_dict(self) -> dict:
-        """Convert config to dictionary for saving."""
-        def convert_paths(obj):
-            """Recursively convert Path objects to strings."""
-            if isinstance(obj, dict):
-                return {k: convert_paths(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_paths(item) for item in obj]
-            elif isinstance(obj, Path):
-                return str(obj)
-            else:
-                return obj
-        
-        return convert_paths({
-            'data': asdict(self.config.data),
-            'model': asdict(self.config.model),
-            'training': asdict(self.config.training),
-            'experiment_name': self.config.experiment_name,
-            'seed': self.config.seed
-        })
+            json.dump(asdict(self.config), f, indent=2, default=str)
     
     def _create_optimizer(self, model: nn.Module, unfreeze_backbone: bool = False) -> optim.Optimizer:
         """Create optimizer based on configuration."""
@@ -276,7 +245,7 @@ class Trainer:
         for epoch in range(self.current_epoch, self.training_config.num_epochs):
             self.current_epoch = epoch
 
-            if self.training_config.unfreeze_backbone and epoch == (self.training_config.num_epochs // 2):
+            if self.training_config.unfreeze_backbone and epoch == (self.training_config.unfreeze_backbone_after_epochs):
                 print("\nUnfreezing backbone for fine-tuning.")
                 model.unfreeze_backbone()
                 remaining_steps = (self.training_config.num_epochs - epoch) * len(train_loader)
@@ -307,7 +276,7 @@ class Trainer:
             self.history['val_acc'].append(val_acc)
             self.history['learning_rates'].append(current_lr)
             
-            # Update scheduler if using ReduceLROnPlateau
+            # Update scheduler if using ReduceLROnPlateau/StepLR
             if scheduler is not None and self.training_config.scheduler.lower() in ["plateau", "step"]:
                 scheduler.step(val_loss)
             
@@ -319,10 +288,6 @@ class Trainer:
             
             # Check for improvement
             improved = False
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                improved = True
-            
             if val_acc > self.best_val_acc:
                 self.best_val_acc = val_acc
                 improved = True
@@ -335,7 +300,7 @@ class Trainer:
             else:
                 self.epochs_without_improvement += 1
             
-            if not self.training_config.save_best_only:
+            if self.training_config.save_individual_epoch:
                 self._save_checkpoint(model, optimizer, scheduler, is_best=improved)
             
             # Early stopping
@@ -443,9 +408,12 @@ class Trainer:
         total_loss = 0.0
         correct = 0
         total = 0
+
+        y_pred = []
+        y_true = []
         
         with torch.no_grad():
-            for inputs, targets in val_loader:
+            for inputs, targets in tqdm(val_loader):
                 inputs = inputs.to(self.device)
                 targets = targets.to(self.device)
                 
@@ -458,9 +426,15 @@ class Trainer:
                     loss = criterion(outputs, targets)
                 
                 total_loss += loss.item()
-                _, predicted = outputs.max(1)
+                predicted = outputs.argmax(dim=1)
                 total += targets.size(0)
                 correct += predicted.eq(targets).sum().item()
+
+                y_pred.extend(predicted.cpu().numpy())
+                y_true.extend(targets.cpu().numpy())
+        
+        print("\nValidation Classification Report:")
+        print(classification_report(y_true, y_pred, digits=4))
         
         avg_loss = total_loss / len(val_loader)
         accuracy = correct / total
@@ -546,21 +520,21 @@ class Trainer:
             'best_val_loss': self.best_val_loss,
             'best_val_acc': self.best_val_acc,
             'history': self.history,
-            'config': self._config_to_dict()
+            'config': asdict(self.config)
         }
         
         # Save latest checkpoint
-        checkpoint_path = self.checkpoint_dir / "checkpoint_latest.pt"
+        checkpoint_path = self.training_config.checkpoint_dir / "checkpoint_latest.pt"
         torch.save(checkpoint, checkpoint_path)
         
         # Save best checkpoint
         if is_best:
-            best_path = self.checkpoint_dir / self.training_config.checkpoint_file_name
+            best_path = self.training_config.checkpoint_dir / self.training_config.checkpoint_file_name
             torch.save(checkpoint, best_path)
         
         # Optionally save epoch checkpoint
         if self.training_config.save_individual_epoch:
-            epoch_path = self.checkpoint_dir / f"checkpoint_epoch_{self.current_epoch+1}.pt"
+            epoch_path = self.training_config.checkpoint_dir / f"checkpoint_epoch_{self.current_epoch+1}.pt"
             torch.save(checkpoint, epoch_path)
     
     def _load_checkpoint(
@@ -590,7 +564,7 @@ class Trainer:
     
     def _save_history(self):
         """Save training history to file."""
-        history_path = self.log_dir / "training_history.json"
+        history_path = self.training_config.log_dir / "training_history.json"
         with open(history_path, 'w') as f:
             json.dump(self.history, f, indent=2)
     
@@ -604,7 +578,7 @@ class Trainer:
         Returns:
             Model with loaded weights
         """
-        best_path = self.checkpoint_dir / self.training_config.checkpoint_file_name
+        best_path = self.training_config.checkpoint_dir / self.training_config.checkpoint_file_name
         
         if not best_path.exists():
             raise FileNotFoundError(f"No best checkpoint found at {best_path}")
@@ -616,18 +590,8 @@ class Trainer:
         print(f"Loaded best model from epoch {checkpoint['epoch']+1}")
         print(f"  Val Loss: {checkpoint['best_val_loss']:.4f}")
         print(f"  Val Acc: {checkpoint['best_val_acc']:.4f}")
+
+        self.best_val_acc = checkpoint['best_val_acc']
+        self.best_val_loss = checkpoint['best_val_loss']
         
         return model
-
-
-def create_trainer(config) -> Trainer:
-    """
-    Factory function to create a Trainer from a Config object.
-    
-    Args:
-        config: Config object containing all training settings
-    
-    Returns:
-        Initialized Trainer object
-    """
-    return Trainer(config)

@@ -184,7 +184,7 @@ def create_ff_dataloaders(
     if config is not None:
         batch_size = config.data.batch_size
         num_workers = config.data.num_workers
-        frames_per_video = config.data.frames_per_video
+        frames_per_video = config.preprocessing.frames_per_video
         manipulation_types = config.data.manipulation_types
         compression = config.data.compression
         use_cache = config.data.use_cache
@@ -326,7 +326,7 @@ def create_celeb_df_dataloaders(
     if config is not None:
         batch_size = config.data.batch_size
         num_workers = config.data.num_workers
-        frames_per_video = config.data.frames_per_video
+        frames_per_video = config.preprocessing.frames_per_video
         use_cache = config.data.use_cache
         if hasattr(config.data, 'preload_cache'):
             preload_cache = config.data.preload_cache

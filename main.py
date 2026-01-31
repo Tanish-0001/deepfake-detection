@@ -26,7 +26,9 @@ def main():
     config = Config()
     
     # Modify as needed
-    config.data.frames_per_video = 10
+    config.preprocessing.frames_per_video = 10
+    config.preprocessing.sampling_strategy = "uniform"
+
     config.data.batch_size = 8
     
     config.model.model_name = "dino_temporal_model"
@@ -84,13 +86,13 @@ def main():
         dataset_type="combined",
         dataset_configs=config.data.get_enabled_dataset_configs(),
         batch_size=config.data.batch_size,
-        frames_per_video=config.data.frames_per_video,
+        frames_per_video=config.preprocessing.frames_per_video,
         video_level=True,
     )
         
     print("Full pipeline configuration:")
     print(f"  Data:")
-    print(f"    - Frames per video: {config.data.frames_per_video}")
+    print(f"    - Frames per video: {config.preprocessing.frames_per_video}")
     print(f"    - Batch size: {config.data.batch_size}")
     print(f"    - Manipulations: {config.data.manipulation_types}")
     
@@ -118,11 +120,20 @@ def main():
     )
     
     # 2. Training
-    from training import create_trainer
+    from training import Trainer
 
     config.training.checkpoint_file_name = f"checkpoint_best_{config.model.model_name}.pt"
+    config.training.unfreeze_backbone = True
+    config.training.unfreeze_backbone_after_epochs = 15
 
-    trainer = create_trainer(config)
+    config.training.resume_training_best = True
+
+    trainer = Trainer(config)
+
+    if config.training.resume_training_best:
+        print("Resuming training from best checkpoint...")
+        model = trainer.load_best_model(model)
+
     _ = trainer.train(model, train_loader, val_loader)
     
     # 3. Evaluate on test set
@@ -139,7 +150,7 @@ def main():
             "num_classes": config.model.num_classes,
             "dropout": config.model.dropout_rate,
             "num_transformer_layers": 4,
-            "max_seq_length": config.data.frames_per_video,  # Must match training
+            "max_seq_length": config.preprocessing.frames_per_video,  # Must match training
         }
     )
 
