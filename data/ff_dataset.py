@@ -548,7 +548,7 @@ def get_ff_dataset(
     # Create preprocessing pipeline
     pipeline = PreprocessingPipeline(
         num_frames=frames_per_video,
-        sampling_strategy="uniform" if split != "train" else "random"
+        sampling_strategy="uniform"
     )
     
     DatasetClass = FFVideoDataset if video_level else FFDataset

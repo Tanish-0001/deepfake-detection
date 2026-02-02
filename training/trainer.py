@@ -63,10 +63,7 @@ class Trainer:
             'val_acc': [],
             'learning_rates': []
         }
-        
-        # Mixed precision scaler
-        self.scaler = GradScaler() if self.training_config.mixed_precision and self.device.type == 'cuda' else None
-        
+                
         # Save config
         self._save_config()
         
@@ -92,8 +89,7 @@ class Trainer:
     def _set_seed(self, seed: int):
         """Set random seed for reproducibility."""
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
     
     def _save_config(self):
@@ -354,21 +350,10 @@ class Trainer:
             
             optimizer.zero_grad()
             
-            # Forward pass with optional mixed precision
-            if self.scaler is not None:
-                with autocast():
-                    outputs = model(inputs)
-                    loss = criterion(outputs, targets)
-                
-                # Backward pass with gradient scaling
-                self.scaler.scale(loss).backward()
-                self.scaler.step(optimizer)
-                self.scaler.update()
-            else:
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
-                loss.backward()
-                optimizer.step()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
             
             # Update scheduler (except for ReduceLROnPlateau)
             if scheduler is not None and self.training_config.scheduler.lower() not in ["plateau", "step", "none"]:
@@ -417,13 +402,8 @@ class Trainer:
                 inputs = inputs.to(self.device)
                 targets = targets.to(self.device)
                 
-                if self.scaler is not None:
-                    with autocast():
-                        outputs = model(inputs)
-                        loss = criterion(outputs, targets)
-                else:
-                    outputs = model(inputs)
-                    loss = criterion(outputs, targets)
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
                 
                 total_loss += loss.item()
                 predicted = outputs.argmax(dim=1)

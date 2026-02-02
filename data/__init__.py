@@ -15,6 +15,11 @@ from .dataloader import (
     get_dataloaders,
     video_collate_fn
 )
+from .real_only_dataset import (
+    RealOnlyDataset,
+    RealOnlyVideoDataset,
+    create_real_only_dataloaders
+)
 
 __all__ = [
     # Individual datasets
@@ -27,6 +32,10 @@ __all__ = [
     'DatasetConfig',
     'DatasetRegistry',
     'create_combined_dataset',
+    # Real-only dataset (for autoencoder training)
+    'RealOnlyDataset',
+    'RealOnlyVideoDataset',
+    'create_real_only_dataloaders',
     # Factory functions
     'get_ff_dataset',
     'get_celeb_df_dataset',

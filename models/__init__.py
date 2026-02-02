@@ -3,6 +3,7 @@ from .simple_cnn import SimpleCNN, SimpleCNNLarge
 from .base_model import BaseModel
 from .dino_model import DinoModel
 from .dino_temporal_model import DinoTemporalModel
+from .autoencoder_detector import AutoencoderDetector, LatentAutoencoder, intervention_cost
 
 __all__ = [
     'BaseModel',
@@ -10,6 +11,9 @@ __all__ = [
     'SimpleCNNLarge',
     'DinoModel',
     'DinoTemporalModel',
+    'AutoencoderDetector',
+    'LatentAutoencoder',
+    'intervention_cost',
     'get_model'
 ]
 
@@ -19,7 +23,8 @@ def get_model(model_name: str, **kwargs):
     Factory function to create models by name.
     
     Args:
-        model_name: Name of the model ('simple_cnn', 'simple_cnn_large', 'dino_model', 'dino_temporal_model')
+        model_name: Name of the model ('simple_cnn', 'simple_cnn_large', 'dino_model', 
+                   'dino_temporal_model', 'autoencoder_detector')
         **kwargs: Additional arguments to pass to the model constructor
     
     Returns:
@@ -29,7 +34,8 @@ def get_model(model_name: str, **kwargs):
         'simple_cnn': SimpleCNN,
         'simple_cnn_large': SimpleCNNLarge,
         'dino_model': DinoModel,
-        'dino_temporal_model': DinoTemporalModel
+        'dino_temporal_model': DinoTemporalModel,
+        'autoencoder_detector': AutoencoderDetector
     }
     
     if model_name not in models:

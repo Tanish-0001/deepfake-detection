@@ -160,7 +160,7 @@ class DinoTemporalModel(BaseModel):
         
         # Reshape back to (B, T, D)
         features = features.view(B, T, -1)
-        
+        features = F.normalize(features, dim=2)
         return features
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:

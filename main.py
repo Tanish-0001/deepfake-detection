@@ -29,7 +29,7 @@ def main():
     config.preprocessing.frames_per_video = 10
     config.preprocessing.sampling_strategy = "uniform"
 
-    config.data.batch_size = 8
+    config.data.batch_size = 32
     
     config.model.model_name = "dino_temporal_model"
     config.model.dropout_rate = 0.3
@@ -89,7 +89,22 @@ def main():
         frames_per_video=config.preprocessing.frames_per_video,
         video_level=True,
     )
-        
+    
+    # 1. Create model
+    from models import get_model
+    config.model.dropout_rate = 0.2
+    config.model.hidden_dims = [256]
+
+    model = get_model(
+        config.model.model_name, 
+        num_classes=config.model.num_classes, 
+        dropout=config.model.dropout_rate,
+        hidden_dims=config.model.hidden_dims,
+        num_transformer_layers=6,
+        max_seq_length=10,  # Match frames_per_video
+
+    )
+
     print("Full pipeline configuration:")
     print(f"  Data:")
     print(f"    - Frames per video: {config.preprocessing.frames_per_video}")
@@ -104,21 +119,6 @@ def main():
     print(f"    - Epochs: {config.training.num_epochs}")
     print(f"    - Learning rate: {config.training.learning_rate}")
     
-    # 1. Create model
-    from models import get_model
-    config.model.dropout_rate = 0.3
-    config.model.hidden_dims = [256]
-
-    model = get_model(
-        config.model.model_name, 
-        num_classes=config.model.num_classes, 
-        dropout=config.model.dropout_rate,
-        # hidden_dims=config.model.hidden_dims,
-        num_transformer_layers=4,
-        max_seq_length=10,  # Match frames_per_video
-
-    )
-    
     # 2. Training
     from training import Trainer
 
@@ -126,7 +126,7 @@ def main():
     config.training.unfreeze_backbone = True
     config.training.unfreeze_backbone_after_epochs = 15
 
-    config.training.resume_training_best = True
+    config.training.resume_training_best = False
 
     trainer = Trainer(config)
 

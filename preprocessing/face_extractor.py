@@ -159,21 +159,25 @@ class RetinaFaceExtractor(FaceExtractor):
             Aligned face image
         """
         # Get eye centers
-        left_eye = landmarks[0]
-        right_eye = landmarks[1]
+        # Note: RetinaFace uses anatomical naming (person's left/right)
+        # landmarks[0] = person's left eye (RIGHT side of image from viewer)
+        # landmarks[1] = person's right eye (LEFT side of image from viewer)
+        # We need viewer's perspective for correct angle calculation
+        right_eye_img = landmarks[0]  # Person's left = viewer's right (higher x)
+        left_eye_img = landmarks[1]   # Person's right = viewer's left (lower x)
         
-        # Calculate angle between eyes
-        dY = right_eye[1] - left_eye[1]
-        dX = right_eye[0] - left_eye[0]
+        # Calculate angle between eyes (from viewer's perspective)
+        dY = right_eye_img[1] - left_eye_img[1]
+        dX = right_eye_img[0] - left_eye_img[0]
         angle = np.degrees(np.arctan2(dY, dX))
         
         # Calculate center between eyes
         eye_center = (
-            (left_eye[0] + right_eye[0]) // 2,
-            (left_eye[1] + right_eye[1]) // 2
+            (left_eye_img[0] + right_eye_img[0]) // 2,
+            (left_eye_img[1] + right_eye_img[1]) // 2
         )
         
-        # Get rotation matrix
+        # Get rotation matrix (rotate to level the eyes)
         M = cv2.getRotationMatrix2D(eye_center, angle, 1.0)
         
         # Apply rotation
