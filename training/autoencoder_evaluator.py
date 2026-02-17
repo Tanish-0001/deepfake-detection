@@ -205,30 +205,44 @@ class AutoencoderEvaluator:
         
         all_costs = []
         all_labels = []
-        all_embeddings = []
+        all_patch_embeddings = []  # (B, num_patches, D) per batch
+        all_per_patch_costs = []   # (B, num_patches) per batch
         
         for images, labels in tqdm(self.dataloader, desc="Evaluating"):
             images = images.to(self.device)
             
-            # Extract features
+            # Extract features - now returns (B, num_patches, 768)
             z = self.model.extract_features(images)
             
-            # Compute intervention cost
+            # Compute aggregated intervention cost - returns (B,)
             costs = self.model.intervention_cost(z)
+            
+            # Compute per-patch costs for analysis - returns (B, num_patches)
+            patch_costs = self.model.intervention_cost_per_patch(z)
             
             all_costs.extend(costs.cpu().numpy())
             all_labels.extend(labels.numpy())
-            all_embeddings.append(z.cpu().numpy())
+            all_patch_embeddings.append(z.cpu().numpy())
+            all_per_patch_costs.append(patch_costs.cpu().numpy())
         
         all_costs = np.array(all_costs)
         all_labels = np.array(all_labels)
-        all_embeddings = np.vstack(all_embeddings)
+        # Stack patch embeddings: (total_samples, num_patches, D)
+        all_patch_embeddings = np.vstack(all_patch_embeddings)
+        all_per_patch_costs = np.vstack(all_per_patch_costs)
         
         # Compute metrics
         metrics = self._compute_metrics(all_costs, all_labels)
         
-        # Add embedding statistics
-        metrics['embedding_stats'] = self._compute_embedding_stats(all_embeddings, all_labels)
+        # Add embedding statistics (uses patch-level embeddings)
+        metrics['embedding_stats'] = self._compute_embedding_stats(
+            all_patch_embeddings, all_labels
+        )
+        
+        # Add per-patch cost statistics
+        metrics['patch_cost_stats'] = self._compute_patch_cost_stats(
+            all_per_patch_costs, all_labels
+        )
         
         return metrics
     
@@ -358,28 +372,110 @@ class AutoencoderEvaluator:
         embeddings: np.ndarray,
         labels: np.ndarray
     ) -> Dict[str, Any]:
-        """Compute statistics on the embeddings."""
+        """
+        Compute statistics on the patch embeddings.
+        
+        Args:
+            embeddings: Patch embeddings of shape (N, num_patches, D)
+            labels: Labels of shape (N,)
+        """
         real_mask = labels == 0
         fake_mask = labels == 1
         
-        real_embeddings = embeddings[real_mask]
-        fake_embeddings = embeddings[fake_mask]
+        real_embeddings = embeddings[real_mask]  # (N_real, num_patches, D)
+        fake_embeddings = embeddings[fake_mask]  # (N_fake, num_patches, D)
         
-        # Mean embeddings
-        real_mean = np.mean(real_embeddings, axis=0)
-        fake_mean = np.mean(fake_embeddings, axis=0)
+        # Compute mean embedding per sample by averaging across patches
+        # Then compute class-level statistics
+        real_mean_per_sample = np.mean(real_embeddings, axis=1)  # (N_real, D)
+        fake_mean_per_sample = np.mean(fake_embeddings, axis=1)  # (N_fake, D)
+        
+        # Mean embeddings across all samples
+        real_mean = np.mean(real_mean_per_sample, axis=0)  # (D,)
+        fake_mean = np.mean(fake_mean_per_sample, axis=0)  # (D,)
         
         # Distance between class means
         mean_distance = np.linalg.norm(real_mean - fake_mean)
         
-        # Average within-class variance
-        real_var = np.mean(np.var(real_embeddings, axis=0))
-        fake_var = np.mean(np.var(fake_embeddings, axis=0))
+        # Average within-class variance (across sample means)
+        real_var = np.mean(np.var(real_mean_per_sample, axis=0))
+        fake_var = np.mean(np.var(fake_mean_per_sample, axis=0))
+        
+        # Also compute patch-level variance (how much patches vary within images)
+        real_patch_var = np.mean(np.var(real_embeddings, axis=1))  # Variance across patches
+        fake_patch_var = np.mean(np.var(fake_embeddings, axis=1))
         
         return {
             'mean_distance_between_classes': float(mean_distance),
             'real_embedding_variance': float(real_var),
-            'fake_embedding_variance': float(fake_var)
+            'fake_embedding_variance': float(fake_var),
+            'real_within_image_patch_variance': float(real_patch_var),
+            'fake_within_image_patch_variance': float(fake_patch_var),
+            'num_patches': int(embeddings.shape[1]),
+            'embedding_dim': int(embeddings.shape[2])
+        }
+    
+    def _compute_patch_cost_stats(
+        self,
+        patch_costs: np.ndarray,
+        labels: np.ndarray
+    ) -> Dict[str, Any]:
+        """
+        Compute statistics on per-patch intervention costs.
+        
+        This reveals how costs are distributed across patches,
+        which can indicate localized manipulation regions.
+        
+        Args:
+            patch_costs: Per-patch costs of shape (N, num_patches)
+            labels: Labels of shape (N,)
+            
+        Returns:
+            Dictionary with patch-level cost statistics
+        """
+        real_mask = labels == 0
+        fake_mask = labels == 1
+        
+        real_patch_costs = patch_costs[real_mask]  # (N_real, num_patches)
+        fake_patch_costs = patch_costs[fake_mask]  # (N_fake, num_patches)
+        
+        # Statistics on within-image patch cost distribution
+        # Variance across patches within each image (high variance = localized anomaly)
+        real_within_var = np.mean(np.var(real_patch_costs, axis=1))
+        fake_within_var = np.mean(np.var(fake_patch_costs, axis=1))
+        
+        # Max patch cost per image (useful for detecting localized fakes)
+        real_max_patch = np.mean(np.max(real_patch_costs, axis=1))
+        fake_max_patch = np.mean(np.max(fake_patch_costs, axis=1))
+        
+        # Min patch cost per image
+        real_min_patch = np.mean(np.min(real_patch_costs, axis=1))
+        fake_min_patch = np.mean(np.min(fake_patch_costs, axis=1))
+        
+        # Ratio of max to mean (high ratio = concentrated anomaly)
+        real_max_mean_ratio = np.mean(
+            np.max(real_patch_costs, axis=1) / (np.mean(real_patch_costs, axis=1) + 1e-8)
+        )
+        fake_max_mean_ratio = np.mean(
+            np.max(fake_patch_costs, axis=1) / (np.mean(fake_patch_costs, axis=1) + 1e-8)
+        )
+        
+        # Average cost per patch position (which patches have highest cost on average)
+        avg_cost_per_patch_real = np.mean(real_patch_costs, axis=0)  # (num_patches,)
+        avg_cost_per_patch_fake = np.mean(fake_patch_costs, axis=0)
+        
+        return {
+            'real_within_image_cost_variance': float(real_within_var),
+            'fake_within_image_cost_variance': float(fake_within_var),
+            'real_max_patch_cost': float(real_max_patch),
+            'fake_max_patch_cost': float(fake_max_patch),
+            'real_min_patch_cost': float(real_min_patch),
+            'fake_min_patch_cost': float(fake_min_patch),
+            'real_max_mean_ratio': float(real_max_mean_ratio),
+            'fake_max_mean_ratio': float(fake_max_mean_ratio),
+            # Top-5 highest cost patch indices for fake images
+            'fake_highest_cost_patches': np.argsort(avg_cost_per_patch_fake)[-5:][::-1].tolist(),
+            'real_highest_cost_patches': np.argsort(avg_cost_per_patch_real)[-5:][::-1].tolist(),
         }
     
     def print_results(self, metrics: Dict[str, Any]):
@@ -424,6 +520,23 @@ class AutoencoderEvaluator:
         print(f"\n📊 Dataset Info:")
         print(f"  Real samples: {metrics['num_real']}")
         print(f"  Fake samples: {metrics['num_fake']}")
+        
+        # Print patch-level statistics if available
+        if 'patch_cost_stats' in metrics:
+            print(f"\n🧩 Patch-Level Cost Analysis:")
+            pstats = metrics['patch_cost_stats']
+            print(f"  Real within-image cost variance: {pstats['real_within_image_cost_variance']:.4f}")
+            print(f"  Fake within-image cost variance: {pstats['fake_within_image_cost_variance']:.4f}")
+            print(f"  Real max patch cost (avg): {pstats['real_max_patch_cost']:.4f}")
+            print(f"  Fake max patch cost (avg): {pstats['fake_max_patch_cost']:.4f}")
+            print(f"  Fake max/mean ratio: {pstats['fake_max_mean_ratio']:.2f}")
+        
+        if 'embedding_stats' in metrics:
+            print(f"\n🔢 Embedding Info:")
+            estats = metrics['embedding_stats']
+            print(f"  Num patches: {estats.get('num_patches', 'N/A')}")
+            print(f"  Embedding dim: {estats.get('embedding_dim', 'N/A')}")
+            print(f"  Class mean distance: {estats['mean_distance_between_classes']:.4f}")
         
         print("="*60)
 

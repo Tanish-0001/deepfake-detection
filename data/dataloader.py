@@ -204,7 +204,7 @@ def create_ff_dataloaders(
     # Create preprocessing pipelines (only used if cache miss)
     train_pipeline = PreprocessingPipeline(
         num_frames=frames_per_video,
-        sampling_strategy="random"  # Random sampling for training
+        sampling_strategy="uniform"  # Uniform sampling for training
     )
     
     val_pipeline = PreprocessingPipeline(
@@ -344,7 +344,7 @@ def create_celeb_df_dataloaders(
     # Create preprocessing pipelines
     train_pipeline = PreprocessingPipeline(
         num_frames=frames_per_video,
-        sampling_strategy="random"
+        sampling_strategy="uniform"  # Uniform sampling for training
     )
     
     val_pipeline = PreprocessingPipeline(

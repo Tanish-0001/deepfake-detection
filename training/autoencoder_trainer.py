@@ -45,15 +45,23 @@ class AutoencoderTrainer:
     4. Evaluate on test set with AUROC
     """
     
-    def __init__(self, config):
+    def __init__(self, config, margin_alpha: float = 2.0, margin_lambda: float = 0.1, use_margin_loss: bool = True):
         """
         Initialize the trainer.
         
         Args:
             config: Config object containing training parameters
+            margin_alpha: Alpha coefficient for margin (margin = mean + alpha * std)
+            margin_lambda: Weight for margin loss (loss = loss_real + lambda * loss_margin)
+            use_margin_loss: Whether to use margin loss on fake samples
         """
         self.config = config
         self.training_config = config.training
+        
+        # Margin loss parameters
+        self.margin_alpha = margin_alpha
+        self.margin_lambda = margin_lambda
+        self.use_margin_loss = use_margin_loss
         
         # Set device
         self.device = self._setup_device()
@@ -67,6 +75,9 @@ class AutoencoderTrainer:
         # Training history
         self.history = {
             'train_loss': [],
+            'train_loss_real': [],
+            'train_loss_margin': [],
+            'train_margin': [],
             'val_loss': [],
             'learning_rates': [],
             'val_auroc': [],
@@ -169,17 +180,19 @@ class AutoencoderTrainer:
         train_loader_real: DataLoader,
         val_loader_full: DataLoader,
         test_loader: Optional[DataLoader] = None,
-        resume_from: Optional[str] = None
+        resume_from: Optional[str] = None,
+        train_loader_full: Optional[DataLoader] = None
     ) -> Dict[str, Any]:
         """
-        Train the autoencoder on real images only.
+        Train the autoencoder on real images, optionally with margin loss on fakes.
         
         Args:
             model: AutoencoderDetector model
-            train_loader_real: DataLoader with ONLY real images for AE training
+            train_loader_real: DataLoader with ONLY real images for AE training (used if no margin loss)
             val_loader_full: DataLoader with BOTH real and fake images for threshold tuning
             test_loader: Optional test DataLoader for final evaluation
             resume_from: Path to checkpoint to resume from
+            train_loader_full: DataLoader with BOTH real and fake images (used if margin loss enabled)
             
         Returns:
             Training results dictionary
@@ -187,9 +200,17 @@ class AutoencoderTrainer:
         # Move model to device
         model = model.to(self.device)
         
+        # Choose which training loader to use
+        if self.use_margin_loss and train_loader_full is not None:
+            train_loader = train_loader_full
+            training_mode = "Real + Margin Loss on Fakes"
+        else:
+            train_loader = train_loader_real
+            training_mode = "Real Images Only"
+        
         # Create optimizer and scheduler
         optimizer = self._create_optimizer(model)
-        num_training_steps = len(train_loader_real) * self.training_config.num_epochs
+        num_training_steps = len(train_loader) * self.training_config.num_epochs
         scheduler = self._create_scheduler(optimizer, num_training_steps)
         
         # Resume from checkpoint if specified
@@ -197,9 +218,11 @@ class AutoencoderTrainer:
             self._load_checkpoint(model, optimizer, scheduler, resume_from)
         
         print(f"\n{'='*60}")
-        print("AUTOENCODER TRAINING (Real Images Only)")
+        print(f"AUTOENCODER TRAINING ({training_mode})")
         print(f"{'='*60}")
-        print(f"Training samples (real only): {len(train_loader_real.dataset)}")
+        print(f"Training samples: {len(train_loader.dataset)}")
+        if self.use_margin_loss:
+            print(f"Margin loss: alpha={self.margin_alpha}, lambda={self.margin_lambda}")
         print(f"Validation samples (real + fake): {len(val_loader_full.dataset)}")
         print(f"Device: {self.device}")
         print(f"Epochs: {self.training_config.num_epochs}")
@@ -210,9 +233,9 @@ class AutoencoderTrainer:
         for epoch in range(self.current_epoch, self.training_config.num_epochs):
             self.current_epoch = epoch
             
-            # Phase 1: Train autoencoder on real images
-            train_loss = self._train_epoch_autoencoder(
-                model, train_loader_real, optimizer, scheduler
+            # Phase 1: Train autoencoder
+            train_metrics = self._train_epoch_autoencoder(
+                model, train_loader, optimizer, scheduler
             )
             
             # Phase 2: Compute costs and find threshold on validation set
@@ -221,8 +244,17 @@ class AutoencoderTrainer:
             # Get current learning rate
             current_lr = optimizer.param_groups[0]['lr']
             
+            # Extract train metrics
+            train_loss = train_metrics['loss']
+            train_loss_real = train_metrics.get('loss_real', train_loss)
+            train_loss_margin = train_metrics.get('loss_margin', 0.0)
+            train_margin = train_metrics.get('margin', 0.0)
+            
             # Update history
             self.history['train_loss'].append(train_loss)
+            self.history['train_loss_real'].append(train_loss_real)
+            self.history['train_loss_margin'].append(train_loss_margin)
+            self.history['train_margin'].append(train_margin)
             self.history['val_loss'].append(val_metrics['val_loss_real'])
             self.history['val_auroc'].append(val_metrics['auroc'])
             self.history['val_threshold'].append(val_metrics['threshold'])
@@ -233,19 +265,28 @@ class AutoencoderTrainer:
                 scheduler.step(train_loss)
             
             # Print progress
-            print(f"Epoch [{epoch+1}/{self.training_config.num_epochs}] "
-                  f"Train Loss: {train_loss:.6f} | "
-                  f"Val AUROC: {val_metrics['auroc']:.4f} | "
-                  f"Threshold: {val_metrics['threshold']:.4f} | "
-                  f"Acc: {val_metrics['accuracy']:.4f} | "
-                  f"LR: {current_lr:.2e}")
+            if self.use_margin_loss:
+                print(f"Epoch [{epoch+1}/{self.training_config.num_epochs}] "
+                      f"Loss: {train_loss:.6f} (real: {train_loss_real:.6f}, margin: {train_loss_margin:.6f}) | "
+                      f"Val AUROC: {val_metrics['auroc']:.4f} | "
+                      f"Threshold: {val_metrics['threshold']:.4f} | "
+                      f"F1: {val_metrics['f1']:.4f} | "
+                      f"LR: {current_lr:.2e}")
+            else:
+                print(f"Epoch [{epoch+1}/{self.training_config.num_epochs}] "
+                      f"Train Loss: {train_loss:.6f} | "
+                      f"Val AUROC: {val_metrics['auroc']:.4f} | "
+                      f"Threshold: {val_metrics['threshold']:.4f} | "
+                      f"Acc: {val_metrics['accuracy']:.4f} | "
+                      f"Precision: {val_metrics['precision']:.4f} | "
+                      f"Recall: {val_metrics['recall']:.4f} | "
+                      f"F1: {val_metrics['f1']:.4f} | "
+                      f"LR: {current_lr:.2e}")
             
             # Check for improvement (use AUROC as primary metric)
-            improved = False
             if val_metrics['auroc'] > self.best_auroc:
                 self.best_auroc = val_metrics['auroc']
                 self.best_val_loss = train_loss
-                improved = True
                 self.epochs_without_improvement = 0
                 
                 # Update model threshold and statistics
@@ -300,33 +341,94 @@ class AutoencoderTrainer:
         train_loader: DataLoader,
         optimizer: optim.Optimizer,
         scheduler
-    ) -> float:
+    ) -> Dict[str, float]:
         """
-        Train autoencoder for one epoch on real images only.
+        Train autoencoder for one epoch.
+        
+        If use_margin_loss is True, trains with combined loss on real + fake samples.
+        Otherwise, trains on real samples only.
         
         Returns:
-            Average reconstruction loss
+            Dictionary with loss metrics
         """
         model.train()
         # Keep backbone in eval mode (frozen)
         model.backbone.eval()
         
         total_loss = 0.0
+        total_loss_real = 0.0
+        total_loss_margin = 0.0
+        total_margin = 0.0
         num_batches = 0
+        num_batches_with_margin = 0
         
         pbar = tqdm(train_loader, desc="Training AE", file=sys.stdout, dynamic_ncols=True)
         
         for batch_idx, (images, labels) in enumerate(pbar):
             images = images.to(self.device)
-            
-            # Verify all samples are real (label=0)
-            assert (labels == 0).all(), "Training data should only contain real images!"
+            labels = labels.to(self.device)
             
             optimizer.zero_grad()
-
-            loss = model.get_autoencoder_loss(images)
-            loss.backward()
-            optimizer.step()
+            
+            if self.use_margin_loss:
+                # Separate real and fake samples
+                real_mask = labels == 0
+                fake_mask = labels == 1
+                
+                images_real = images[real_mask]
+                images_fake = images[fake_mask]
+                
+                # Compute real reconstruction loss
+                if images_real.size(0) > 0:
+                    loss_real = model.get_autoencoder_loss(images_real)
+                    total_loss_real += loss_real.item()
+                else:
+                    loss_real = torch.tensor(0.0, device=self.device)
+                
+                # Compute margin loss on fake samples
+                if images_fake.size(0) > 0 and images_real.size(0) > 0:
+                    # Extract features for fake images
+                    z_fake = model.extract_features(images_fake)
+                    
+                    # Compute margin from real sample costs
+                    with torch.no_grad():
+                        z_real = model.extract_features(images_real)
+                        cost_real = model.intervention_cost_trainable(z_real)
+                        mean_cost = cost_real.mean().item()
+                        std_cost = cost_real.std().item()
+                        margin = mean_cost + self.margin_alpha * std_cost
+                    
+                    # Compute margin loss on fake samples
+                    loss_margin = model.get_margin_loss(z_fake, margin)
+                    total_loss_margin += loss_margin.item()
+                    total_margin += margin
+                    num_batches_with_margin += 1
+                    
+                    # Combined loss
+                    loss = loss_real + self.margin_lambda * loss_margin
+                else:
+                    loss = loss_real
+                    loss_margin = torch.tensor(0.0, device=self.device)
+                
+                loss.backward()
+                optimizer.step()
+                
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'real': f'{loss_real.item():.4f}',
+                    'margin': f'{loss_margin.item():.4f}'
+                })
+            else:
+                # Original behavior: only real images
+                assert (labels == 0).all(), "Training data should only contain real images!"
+                
+                loss = model.get_autoencoder_loss(images)
+                loss.backward()
+                optimizer.step()
+                
+                total_loss_real += loss.item()
+                
+                pbar.set_postfix({'loss': f'{loss.item():.6f}'})
             
             # Update scheduler (for cosine annealing)
             if scheduler is not None and self.training_config.scheduler.lower() == "cosine":
@@ -334,10 +436,18 @@ class AutoencoderTrainer:
             
             total_loss += loss.item()
             num_batches += 1
-            
-            pbar.set_postfix({'loss': f'{loss.item():.6f}'})
         
-        return total_loss / num_batches
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        avg_loss_real = total_loss_real / num_batches if num_batches > 0 else 0.0
+        avg_loss_margin = total_loss_margin / num_batches_with_margin if num_batches_with_margin > 0 else 0.0
+        avg_margin = total_margin / num_batches_with_margin if num_batches_with_margin > 0 else 0.0
+        
+        return {
+            'loss': avg_loss,
+            'loss_real': avg_loss_real,
+            'loss_margin': avg_loss_margin,
+            'margin': avg_margin
+        }
     
     @torch.no_grad()
     def _evaluate_with_threshold(
@@ -480,6 +590,18 @@ class AutoencoderTrainer:
                 model_config['bottleneck_dim'] = model.autoencoder.bottleneck_dim
             if hasattr(model.autoencoder, 'input_dim'):
                 model_config['input_dim'] = model.autoencoder.input_dim
+            if hasattr(model.autoencoder, 'add_noise'):
+                model_config['add_noise'] = model.autoencoder.add_noise
+            if hasattr(model.autoencoder, 'noise_std'):
+                model_config['noise_std'] = model.autoencoder.noise_std
+        
+        # Save model-level config
+        if hasattr(model, 'normalize_features'):
+            model_config['normalize_features'] = model.normalize_features
+        if hasattr(model, 'intermediate_layers'):
+            model_config['intermediate_layers'] = model.intermediate_layers
+        if hasattr(model, 'layer_index'):
+            model_config['layer_index'] = model.layer_index
         
         checkpoint = {
             'epoch': self.current_epoch,

@@ -4,6 +4,7 @@ from .base_model import BaseModel
 from .dino_model import DinoModel
 from .dino_temporal_model import DinoTemporalModel
 from .autoencoder_detector import AutoencoderDetector, LatentAutoencoder, intervention_cost
+from .dino_svd_model import DinoSVDModel, SVDResidualLinear
 
 __all__ = [
     'BaseModel',
@@ -14,6 +15,8 @@ __all__ = [
     'AutoencoderDetector',
     'LatentAutoencoder',
     'intervention_cost',
+    'DinoSVDModel',
+    'SVDResidualLinear',
     'get_model'
 ]
 
@@ -24,7 +27,7 @@ def get_model(model_name: str, **kwargs):
     
     Args:
         model_name: Name of the model ('simple_cnn', 'simple_cnn_large', 'dino_model', 
-                   'dino_temporal_model', 'autoencoder_detector')
+                   'dino_temporal_model', 'autoencoder_detector', 'dino_svd')
         **kwargs: Additional arguments to pass to the model constructor
     
     Returns:
@@ -35,7 +38,8 @@ def get_model(model_name: str, **kwargs):
         'simple_cnn_large': SimpleCNNLarge,
         'dino_model': DinoModel,
         'dino_temporal_model': DinoTemporalModel,
-        'autoencoder_detector': AutoencoderDetector
+        'autoencoder_detector': AutoencoderDetector,
+        'dino_svd': DinoSVDModel
     }
     
     if model_name not in models:

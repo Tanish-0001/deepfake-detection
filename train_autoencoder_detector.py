@@ -49,7 +49,7 @@ def parse_args():
     parser.add_argument(
         "--dataset",
         type=str,
-        default="ff",
+        default="combined",
         choices=["ff", "celeb_df", "combined"],
         help="Dataset to train on (ff, celeb_df, or combined for both)"
     )
@@ -70,14 +70,14 @@ def parse_args():
     parser.add_argument(
         "--bottleneck_dim",
         type=int,
-        default=16,
+        default=16,  # Smaller for better compression
         help="Bottleneck dimension for autoencoder (smaller = more compression)"
     )
     parser.add_argument(
         "--hidden_dims",
         type=int,
         nargs="+",
-        default=[256, 128, 64],
+        default=[],
         help="Hidden layer dimensions for encoder/decoder"
     )
     parser.add_argument(
@@ -85,6 +85,62 @@ def parse_args():
         type=float,
         default=0.1,
         help="Dropout rate"
+    )
+    parser.add_argument(
+        "--intermediate_layers",
+        type=int,
+        default=1,
+        help="Number of intermediate backbone layers to extract (from the end)"
+    )
+    parser.add_argument(
+        "--layer_index",
+        type=int,
+        default=-1,
+        help="Which layer to use (0=earliest extracted, -1=final layer)"
+    )
+    
+    # Autoencoder architecture settings
+    parser.add_argument(
+        "--normalize_features",
+        action="store_true",
+        default=True,
+        help="L2 normalize extracted features (default: False, keeps magnitude info)"
+    )
+    parser.add_argument(
+        "--add_noise",
+        action="store_true",
+        default=False,
+        help="Use denoising autoencoder (add noise during training)"
+    )
+    parser.add_argument(
+        "--no_noise",
+        action="store_true",
+        help="Disable denoising (no noise added)"
+    )
+    parser.add_argument(
+        "--noise_std",
+        type=float,
+        default=0.1,
+        help="Standard deviation of noise for denoising autoencoder"
+    )
+    
+    # Margin loss settings
+    parser.add_argument(
+        "--margin_alpha",
+        type=float,
+        default=2.0,
+        help="Alpha coefficient for margin: margin = mean(cost_real) + alpha * std(cost_real)"
+    )
+    parser.add_argument(
+        "--margin_lambda",
+        type=float,
+        default=0.1,
+        help="Lambda weight for margin loss: loss = loss_real + lambda * loss_margin"
+    )
+    parser.add_argument(
+        "--no_margin_loss",
+        action="store_true",
+        help="Disable margin loss on fake samples (train on real only)"
     )
     
     # Training settings
@@ -241,6 +297,10 @@ def main():
     args = parse_args()
     config = create_config(args)
     
+    # Handle negation flags
+    add_noise = args.add_noise and not args.no_noise
+    use_margin_loss = not args.no_margin_loss
+    
     print("="*60)
     print("AUTOENCODER-BASED DEEPFAKE DETECTOR")
     print("="*60)
@@ -250,6 +310,11 @@ def main():
         print(f"  Celeb-DF weight: {args.celeb_df_weight}")
     print(f"Bottleneck dim: {args.bottleneck_dim}")
     print(f"Hidden dims: {args.hidden_dims}")
+    print(f"Intermediate layers: {args.intermediate_layers}")
+    print(f"Layer index: {args.layer_index} ({'earliest' if args.layer_index == 0 else 'final' if args.layer_index == -1 else args.layer_index})")
+    print(f"Normalize features: {args.normalize_features}")
+    print(f"Denoising AE: {add_noise} (noise_std={args.noise_std})")
+    print(f"Margin loss: {use_margin_loss} (alpha={args.margin_alpha}, lambda={args.margin_lambda})")
     print(f"Epochs: {args.epochs}")
     print(f"Batch size: {args.batch_size}")
     print(f"Learning rate: {args.lr}")
@@ -262,7 +327,12 @@ def main():
         num_classes=2,
         bottleneck_dim=args.bottleneck_dim,
         hidden_dims=args.hidden_dims,
-        dropout=args.dropout
+        dropout=args.dropout,
+        intermediate_layers=args.intermediate_layers,
+        layer_index=args.layer_index,
+        normalize_features=args.normalize_features,
+        add_noise=add_noise,
+        noise_std=args.noise_std
     )
     
     # Count parameters
@@ -329,11 +399,17 @@ def main():
     )
     
     print(f"Training samples (real only): {len(train_dataset_real)}")
+    print(f"Training samples (all): {len(train_loader.dataset)}")
     print(f"Validation samples (all): {len(val_loader.dataset)}")
     print(f"Test samples (all): {len(test_loader.dataset)}")
     
-    # Create trainer
-    trainer = AutoencoderTrainer(config)
+    # Create trainer with margin loss parameters
+    trainer = AutoencoderTrainer(
+        config,
+        margin_alpha=args.margin_alpha,
+        margin_lambda=args.margin_lambda,
+        use_margin_loss=use_margin_loss
+    )
     
     # Train
     print("\n🚀 Starting training...")
@@ -342,7 +418,8 @@ def main():
         train_loader_real=train_loader_real,
         val_loader_full=val_loader,
         test_loader=test_loader,
-        resume_from=args.resume
+        resume_from=args.resume,
+        train_loader_full=train_loader  # Pass full loader for margin loss
     )
     
     print("\n✅ Training complete!")
@@ -359,7 +436,12 @@ def main():
         'num_classes': 2,
         'bottleneck_dim': args.bottleneck_dim,
         'hidden_dims': args.hidden_dims,
-        'dropout': args.dropout
+        'dropout': args.dropout,
+        'intermediate_layers': args.intermediate_layers,
+        'layer_index': args.layer_index,
+        'normalize_features': args.normalize_features,
+        'add_noise': add_noise,
+        'noise_std': args.noise_std
     }
     evaluator = AutoencoderEvaluator(
         "checkpoints/autoencoder_detector/checkpoint_best_autoencoder.pt", 

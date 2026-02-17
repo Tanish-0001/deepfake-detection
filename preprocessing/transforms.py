@@ -92,7 +92,7 @@ class RandomHorizontalFlip:
 class RandomRotation:
     """Randomly rotate image."""
     
-    def __init__(self, max_angle: float = 10):
+    def __init__(self, max_angle: float = 5):
         self.max_angle = max_angle
     
     def __call__(self, image: np.ndarray) -> np.ndarray:
@@ -108,9 +108,9 @@ class ColorJitter:
     
     def __init__(
         self,
-        brightness: float = 0.2,
-        contrast: float = 0.2,
-        saturation: float = 0.2
+        brightness: float = 0.05,
+        contrast: float = 0.05,
+        saturation: float = 0.05
     ):
         self.brightness = brightness
         self.contrast = contrast
@@ -138,21 +138,6 @@ class ColorJitter:
         return image
 
 
-class GaussianNoise:
-    """Add Gaussian noise to image."""
-    
-    def __init__(self, mean: float = 0, std: float = 10, p: float = 0.3):
-        self.mean = mean
-        self.std = std
-        self.p = p
-    
-    def __call__(self, image: np.ndarray) -> np.ndarray:
-        if np.random.random() < self.p:
-            noise = np.random.normal(self.mean, self.std, image.shape)
-            image = np.clip(image + noise, 0, 255).astype(np.uint8)
-        return image
-
-
 class GaussianBlur:
     """Apply Gaussian blur to image."""
     
@@ -169,7 +154,7 @@ class GaussianBlur:
 class JPEGCompression:
     """Simulate JPEG compression artifacts."""
     
-    def __init__(self, quality_range: Tuple[int, int] = (70, 100), p: float = 0.3):
+    def __init__(self, quality_range: Tuple[int, int] = (80, 100), p: float = 0.3):
         self.quality_range = quality_range
         self.p = p
     
@@ -202,9 +187,9 @@ def get_train_transforms(config: Optional[TransformConfig] = None) -> Compose:
     if config.use_augmentation:
         transforms.extend([
             RandomHorizontalFlip(config.horizontal_flip_prob),
-            ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05),
             GaussianBlur(kernel_size=3, p=0.1),
-            JPEGCompression(quality_range=(70, 100), p=0.1),
+            JPEGCompression(quality_range=(80, 100), p=0.1),
         ])
     
     transforms.extend([
@@ -252,10 +237,7 @@ def get_pytorch_transforms(train: bool = True, config: Optional[TransformConfig]
     Returns:
         torchvision.transforms.Compose
     """
-    try:
-        import torchvision.transforms as T
-    except ImportError:
-        raise ImportError("torchvision is required for PyTorch transforms")
+    import torchvision.transforms as T
     
     if config is None:
         config = TransformConfig()
@@ -265,7 +247,7 @@ def get_pytorch_transforms(train: bool = True, config: Optional[TransformConfig]
             T.ToPILImage(),
             T.Resize(config.input_size),
             T.RandomHorizontalFlip(config.horizontal_flip_prob),
-            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            T.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05),
             T.ToTensor(),
             T.Normalize(mean=config.mean, std=config.std),
         ])
