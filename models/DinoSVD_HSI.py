@@ -15,8 +15,14 @@ class HSI_Encoder(nn.Module):
         self.RGB2HSI = MST_Plus_Plus(in_channels=in_channels, out_channels=31)
 
         # Load pre-trained weights from the models directory
-        weights_path = os.path.join(_MODELS_DIR, 'mst_plus_plus.pth')
-        self.RGB2HSI.load_state_dict(torch.load(weights_path, weights_only=True))
+        weights_path = os.path.join(_MODELS_DIR, 'hyper_skin_mstpp.pt')
+
+        ckpt = torch.load(weights_path, map_location='cpu')
+
+        if "state_dict" in ckpt:
+            ckpt = ckpt["state_dict"]
+
+        self.RGB2HSI.load_state_dict(ckpt)
         self.RGB2HSI.requires_grad_(False)
 
         if hidden_dims is None:
@@ -25,12 +31,13 @@ class HSI_Encoder(nn.Module):
             self.hidden_dims = hidden_dims
 
         self.feature_size = self.hidden_dims[-1]  # after global average pooling
+        self.encoding_dim = encoding_dim
 
         self.feature_extractor = self._build_features()
         self.encoder = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(self.feature_size, encoding_dim)
+            nn.Linear(self.feature_size, self.encoding_dim)
         )
 
     def _build_features(self) -> nn.Sequential:
@@ -61,11 +68,15 @@ class HSI_Encoder(nn.Module):
 class DinoSVD_with_HSI_Model(nn.Module):
     def __init__(
             self, 
-            num_classes=31, 
+            num_classes=2, 
             hsi_encoding_dim=256,
             hsi_hidden_dims=None,
             classifier_hidden_dims=None, 
-            dropout=0.1
+            dropout=0.1,
+            dino_model="dinov2_vitb14",
+            svd_rank=None,
+            target_modules=None,
+            use_learned_scaling=True
         ):
         super(DinoSVD_with_HSI_Model, self).__init__()
         
@@ -73,12 +84,24 @@ class DinoSVD_with_HSI_Model(nn.Module):
 
         self.dino_svd = DinoSVDModel(
             hidden_dims=[],  # no classifier layers since we will use the features directly
-            dropout=0.2,
-            dino_model="dinov2_vitb14",
+            dropout=dropout,
+            dino_model=dino_model,
+            svd_rank=svd_rank,
+            target_modules=target_modules,
         )
 
         if classifier_hidden_dims is None:
             classifier_hidden_dims = [256, 16]
+
+        # Learned scaling factors instead of hard L2 normalization
+        self.use_learned_scaling = use_learned_scaling
+        if use_learned_scaling:
+            self.hsi_scale = nn.Parameter(torch.ones(1))
+            self.dino_scale = nn.Parameter(torch.ones(1))
+
+        # Separate LayerNorms for each feature branch before fusion
+        self.hsi_norm = nn.LayerNorm(hsi_encoding_dim)
+        self.dino_norm = nn.LayerNorm(self.dino_svd.feature_dim)
 
         layers = []
         input_size = self.dino_svd.feature_dim + hsi_encoding_dim
@@ -104,10 +127,56 @@ class DinoSVD_with_HSI_Model(nn.Module):
         hsi_encoding = self.hsi_encoder(x)
         dino_features = self.dino_svd.get_features(x)
 
-        hsi_encoding = F.normalize(hsi_encoding, dim=1)
-        dino_features = F.normalize(dino_features, dim=1)
+        # Normalize each branch independently with LayerNorm (preserves magnitude info)
+        hsi_encoding = self.hsi_norm(hsi_encoding)
+        dino_features = self.dino_norm(dino_features)
+
+        if self.use_learned_scaling:
+            hsi_encoding = hsi_encoding * self.hsi_scale
+            dino_features = dino_features * self.dino_scale
 
         combined_features = torch.cat([hsi_encoding, dino_features], dim=1)
         out = self.classifier(combined_features)
+
+        # Cache normalized features for decorrelation loss computation
+        self._cached_hsi_features = hsi_encoding
+        self._cached_dino_features = dino_features
+
         return out
 
+    def compute_decorrelation_loss(self) -> torch.Tensor:
+        """
+        Compute feature decorrelation loss between HSI and DINO branches.
+        
+        Encourages the two encoders to capture complementary (non-redundant)
+        information, which improves cross-dataset generalization.
+        
+        Uses the Hilbert-Schmidt Independence Criterion (HSIC) approximation:
+        Minimize the squared Frobenius norm of the cross-covariance matrix.
+        """
+        if not hasattr(self, '_cached_hsi_features') or self._cached_hsi_features is None:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        
+        hsi = self._cached_hsi_features  # (B, D_hsi)
+        dino = self._cached_dino_features  # (B, D_dino)
+        
+        # Center features
+        hsi_centered = hsi - hsi.mean(dim=0, keepdim=True)
+        dino_centered = dino - dino.mean(dim=0, keepdim=True)
+        
+        # Cross-covariance matrix: (D_hsi, D_dino)
+        batch_size = hsi.size(0)
+        cross_cov = (hsi_centered.T @ dino_centered) / (batch_size - 1 + 1e-8)
+        
+        # Minimize squared Frobenius norm of cross-covariance
+        loss = torch.norm(cross_cov, p='fro') ** 2
+        
+        return loss
+
+
+if __name__ == "__main__":
+    # Test the model with dummy input
+    model = DinoSVD_with_HSI_Model(num_classes=2)
+    dummy_input = torch.randn(2, 3, 128, 128)  # Batch of 2 RGB images
+    output = model(dummy_input)
+    print("Output shape:", output.shape)  # Should be [2, 2] for binary classification

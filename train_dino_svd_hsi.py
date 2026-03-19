@@ -46,6 +46,7 @@ from sklearn.metrics import (
     confusion_matrix,
     classification_report
 )
+import torch.nn.functional as F
 
 # Add project root to path
 project_root = Path(__file__).parent
@@ -56,6 +57,433 @@ from models.DinoSVD_HSI import DinoSVD_with_HSI_Model
 from models.dino_svd_model import SVDResidualLinear
 from data import get_dataloaders
 from data.dataloader import create_ff_dataloaders, create_celeb_df_dataloaders
+
+
+def analyze_feature_contributions(
+    model: DinoSVD_with_HSI_Model,
+    test_loader: DataLoader,
+    device: torch.device,
+    num_samples: int = 500,
+    save_path: Optional[Path] = None
+) -> Dict[str, Any]:
+    """
+    Analyze the contributions of HSI and DinoSVD features to the classifier predictions.
+    
+    This function performs multiple analyses:
+    1. Feature magnitude analysis: Compare activation magnitudes from each encoder
+    2. Gradient-based attribution: Compute gradients w.r.t. each feature set
+    3. Ablation study: Test predictions with zeroed HSI/DinoSVD features
+    4. Classifier weight analysis: Analyze which input dimensions are most important
+    
+    Args:
+        model: Trained DinoSVD_with_HSI_Model
+        test_loader: DataLoader for test images
+        device: Device to run on
+        num_samples: Maximum number of samples to analyze
+        save_path: Optional path to save results
+        
+    Returns:
+        Dictionary containing analysis results
+    """
+    model.eval()
+    model.to(device)
+    
+    # Keep RGB2HSI in eval mode
+    model.hsi_encoder.RGB2HSI.eval()
+    
+    # Get feature dimensions
+    hsi_dim = model.hsi_encoder.encoding_dim
+    dino_dim = model.dino_svd.feature_dim  # 768 for dinov2_vitb14
+    
+    print("\n" + "=" * 60)
+    print("Feature Contribution Analysis")
+    print("=" * 60)
+    print(f"HSI feature dimension: {hsi_dim}")
+    print(f"DinoSVD feature dimension: {dino_dim}")
+    print(f"Total combined features: {hsi_dim + dino_dim}")
+    print("-" * 60)
+    
+    # Storage for analysis
+    all_hsi_features = []
+    all_dino_features = []
+    all_labels = []
+    all_predictions = []
+    all_probs = []
+    
+    # Gradient accumulation
+    hsi_gradients = []
+    dino_gradients = []
+    
+    # Ablation results
+    ablation_hsi_only_preds = []
+    ablation_dino_only_preds = []
+    ablation_both_preds = []
+    
+    samples_processed = 0
+    
+    print("\nPhase 1: Extracting features and running ablation study...")
+    
+    # Phase 1: Feature extraction and ablation (no gradients needed)
+    for batch in tqdm(test_loader, desc="Feature extraction", leave=False):
+        if samples_processed >= num_samples:
+            break
+            
+        # Handle both tuple format (frames, labels) and dict format
+        if isinstance(batch, (list, tuple)):
+            images, labels = batch[0], batch[1]
+        else:
+            images, labels = batch['frames'], batch['label']
+        
+        images = images.to(device)
+        labels = labels.to(device)
+        
+        # Handle video-level batches (B, T, C, H, W) -> (B*T, C, H, W)
+        if images.dim() == 5:
+            B, T, C, H, W = images.shape
+            images = images.view(B * T, C, H, W)
+            labels = labels.unsqueeze(1).expand(B, T).reshape(B * T)
+        
+        batch_size = images.size(0)
+        if samples_processed + batch_size > num_samples:
+            images = images[:num_samples - samples_processed]
+            labels = labels[:num_samples - samples_processed]
+        
+        # Extract features from both encoders (no gradients)
+        with torch.no_grad():
+            hsi_encoding = model.hsi_encoder(images)
+            dino_features = model.dino_svd.get_features(images)
+            
+            # Normalize as in the model
+            hsi_encoding_norm = model.hsi_norm(hsi_encoding)
+            dino_features_norm = model.dino_norm(dino_features)
+            
+            # Store features on CPU immediately
+            all_hsi_features.append(hsi_encoding_norm.cpu())
+            all_dino_features.append(dino_features_norm.cpu())
+            all_labels.append(labels.cpu())
+            
+            # Full forward pass for predictions
+            combined_features = torch.cat([hsi_encoding_norm, dino_features_norm], dim=1)
+            logits = model.classifier(combined_features)
+            probs = torch.softmax(logits, dim=1)[:, 1]
+            preds = torch.argmax(logits, dim=1)
+            
+            all_predictions.append(preds.cpu())
+            all_probs.append(probs.cpu())
+            ablation_both_preds.append(preds.cpu())
+            
+            # --- Ablation Study ---
+            # Use mean-replacement instead of zeroing to avoid LayerNorm distribution shift.
+            # Mean features approximate "uninformative" input without distorting the
+            # classifier's expected feature distribution.
+            
+            # HSI only (replace DinoSVD with batch mean)
+            mean_dino = dino_features_norm.mean(dim=0, keepdim=True).expand_as(dino_features_norm)
+            combined_hsi_only = torch.cat([hsi_encoding_norm, mean_dino], dim=1)
+            logits_hsi_only = model.classifier(combined_hsi_only)
+            preds_hsi_only = torch.argmax(logits_hsi_only, dim=1)
+            ablation_hsi_only_preds.append(preds_hsi_only.cpu())
+            
+            # DinoSVD only (replace HSI with batch mean)
+            mean_hsi = hsi_encoding_norm.mean(dim=0, keepdim=True).expand_as(hsi_encoding_norm)
+            combined_dino_only = torch.cat([mean_hsi, dino_features_norm], dim=1)
+            logits_dino_only = model.classifier(combined_dino_only)
+            preds_dino_only = torch.argmax(logits_dino_only, dim=1)
+            ablation_dino_only_preds.append(preds_dino_only.cpu())
+        
+        samples_processed += images.size(0)
+        
+        # Clear CUDA cache
+        del images, labels, hsi_encoding, dino_features, hsi_encoding_norm, dino_features_norm
+        del combined_features, logits, probs, preds
+        del mean_dino, combined_hsi_only, logits_hsi_only, preds_hsi_only
+        del mean_hsi, combined_dino_only, logits_dino_only, preds_dino_only
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    # Phase 2: Gradient-based attribution (process one sample at a time to save memory)
+    print("\nPhase 2: Computing gradient-based attribution...")
+    
+    samples_for_gradients = min(num_samples, 200)  # Limit gradient computation samples
+    gradient_samples_processed = 0
+    
+    for batch in tqdm(test_loader, desc="Gradient analysis", leave=False):
+        if gradient_samples_processed >= samples_for_gradients:
+            break
+            
+        if isinstance(batch, (list, tuple)):
+            images, labels = batch[0], batch[1]
+        else:
+            images, labels = batch['frames'], batch['label']
+        
+        images = images.to(device)
+        
+        if images.dim() == 5:
+            B, T, C, H, W = images.shape
+            images = images.view(B * T, C, H, W)
+        
+        # Process one image at a time for gradient computation to save memory
+        for i in range(images.size(0)):
+            if gradient_samples_processed >= samples_for_gradients:
+                break
+            
+            single_image = images[i:i+1]
+            
+            # Extract features with gradients
+            hsi_encoding = model.hsi_encoder(single_image)
+            dino_features = model.dino_svd.get_features(single_image)
+            
+            hsi_encoding_norm = model.hsi_norm(hsi_encoding)
+            dino_features_norm = model.dino_norm(dino_features)
+            
+            # Detach and require gradients
+            hsi_feat = hsi_encoding_norm.detach().requires_grad_(True)
+            dino_feat = dino_features_norm.detach().requires_grad_(True)
+            
+            combined = torch.cat([hsi_feat, dino_feat], dim=1)
+            logit = model.classifier(combined)
+            
+            pred_class = logit[0].argmax()
+            logit[0, pred_class].backward()
+            
+            hsi_gradients.append(hsi_feat.grad[0].abs().mean().item())
+            dino_gradients.append(dino_feat.grad[0].abs().mean().item())
+            
+            gradient_samples_processed += 1
+            
+            # Clean up
+            del single_image, hsi_encoding, dino_features, hsi_encoding_norm, dino_features_norm
+            del hsi_feat, dino_feat, combined, logit
+        
+        del images
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    # Concatenate all results
+    all_hsi_features = torch.cat(all_hsi_features, dim=0)
+    all_dino_features = torch.cat(all_dino_features, dim=0)
+    all_labels = torch.cat(all_labels, dim=0).numpy()
+    all_predictions = torch.cat(all_predictions, dim=0).numpy()
+    all_probs = torch.cat(all_probs, dim=0).numpy()
+    
+    ablation_hsi_only_preds = torch.cat(ablation_hsi_only_preds, dim=0).numpy()
+    ablation_dino_only_preds = torch.cat(ablation_dino_only_preds, dim=0).numpy()
+    ablation_both_preds = torch.cat(ablation_both_preds, dim=0).numpy()
+    
+    # === Analysis Results ===
+    results = {}
+    
+    # 1. Feature Magnitude Analysis
+    print("\n1. FEATURE MAGNITUDE ANALYSIS")
+    print("-" * 40)
+    
+    hsi_magnitudes = torch.norm(all_hsi_features, dim=1).numpy()
+    dino_magnitudes = torch.norm(all_dino_features, dim=1).numpy()
+    
+    results['feature_magnitudes'] = {
+        'hsi_mean': float(np.mean(hsi_magnitudes)),
+        'hsi_std': float(np.std(hsi_magnitudes)),
+        'dino_mean': float(np.mean(dino_magnitudes)),
+        'dino_std': float(np.std(dino_magnitudes)),
+        'magnitude_ratio_hsi_to_dino': float(np.mean(hsi_magnitudes) / np.mean(dino_magnitudes))
+    }
+    
+    print(f"HSI Feature Magnitudes:   mean={results['feature_magnitudes']['hsi_mean']:.4f}, std={results['feature_magnitudes']['hsi_std']:.4f}")
+    print(f"DinoSVD Feature Magnitudes: mean={results['feature_magnitudes']['dino_mean']:.4f}, std={results['feature_magnitudes']['dino_std']:.4f}")
+    print(f"Magnitude Ratio (HSI/DinoSVD): {results['feature_magnitudes']['magnitude_ratio_hsi_to_dino']:.4f}")
+    
+    # 2. Gradient-based Attribution
+    print("\n2. GRADIENT-BASED ATTRIBUTION")
+    print("-" * 40)
+    
+    hsi_gradients = np.array(hsi_gradients)
+    dino_gradients = np.array(dino_gradients)
+    
+    total_gradients = hsi_gradients + dino_gradients
+    hsi_contribution = hsi_gradients / (total_gradients + 1e-8)
+    dino_contribution = dino_gradients / (total_gradients + 1e-8)
+    
+    results['gradient_attribution'] = {
+        'hsi_gradient_mean': float(np.mean(hsi_gradients)),
+        'hsi_gradient_std': float(np.std(hsi_gradients)),
+        'dino_gradient_mean': float(np.mean(dino_gradients)),
+        'dino_gradient_std': float(np.std(dino_gradients)),
+        'hsi_contribution_percent': float(np.mean(hsi_contribution) * 100),
+        'dino_contribution_percent': float(np.mean(dino_contribution) * 100),
+        'num_samples_analyzed': len(hsi_gradients)
+    }
+    
+    print(f"(Analyzed {len(hsi_gradients)} samples for gradient attribution)")
+    print(f"HSI Gradient Magnitude:   mean={results['gradient_attribution']['hsi_gradient_mean']:.6f}")
+    print(f"DinoSVD Gradient Magnitude: mean={results['gradient_attribution']['dino_gradient_mean']:.6f}")
+    print(f"\nRelative Contributions:")
+    print(f"  HSI: {results['gradient_attribution']['hsi_contribution_percent']:.2f}%")
+    print(f"  DinoSVD: {results['gradient_attribution']['dino_contribution_percent']:.2f}%")
+    
+    # 3. Ablation Study
+    print("\n3. ABLATION STUDY")
+    print("-" * 40)
+    print(f"(Using {len(all_labels)} samples for ablation analysis)")
+    
+    acc_both = accuracy_score(all_labels, ablation_both_preds) * 100
+    acc_hsi_only = accuracy_score(all_labels, ablation_hsi_only_preds) * 100
+    acc_dino_only = accuracy_score(all_labels, ablation_dino_only_preds) * 100
+    
+    # How many predictions change when we ablate each component
+    hsi_ablation_change = np.mean(ablation_both_preds != ablation_dino_only_preds) * 100
+    dino_ablation_change = np.mean(ablation_both_preds != ablation_hsi_only_preds) * 100
+    
+    results['ablation_study'] = {
+        'accuracy_both': float(acc_both),
+        'accuracy_hsi_only': float(acc_hsi_only),
+        'accuracy_dino_only': float(acc_dino_only),
+        'hsi_ablation_accuracy_drop': float(acc_both - acc_dino_only),
+        'dino_ablation_accuracy_drop': float(acc_both - acc_hsi_only),
+        'predictions_changed_without_hsi': float(hsi_ablation_change),
+        'predictions_changed_without_dino': float(dino_ablation_change)
+    }
+    
+    print(f"Accuracy with BOTH features: {acc_both:.2f}%")
+    print(f"Accuracy with HSI ONLY: {acc_hsi_only:.2f}%")
+    print(f"Accuracy with DinoSVD ONLY: {acc_dino_only:.2f}%")
+    print(f"\nAccuracy Drop Analysis:")
+    print(f"  Removing HSI (keeping DinoSVD): {results['ablation_study']['hsi_ablation_accuracy_drop']:.2f}% drop")
+    print(f"  Removing DinoSVD (keeping HSI): {results['ablation_study']['dino_ablation_accuracy_drop']:.2f}% drop")
+    print(f"\nPrediction Change Analysis:")
+    print(f"  Predictions changed without HSI: {hsi_ablation_change:.2f}%")
+    print(f"  Predictions changed without DinoSVD: {dino_ablation_change:.2f}%")
+    
+    # 4. Classifier Weight Analysis
+    print("\n4. CLASSIFIER WEIGHT ANALYSIS")
+    print("-" * 40)
+    
+    # Get the first linear layer weights
+    first_layer = None
+    for module in model.classifier:
+        if isinstance(module, nn.Linear):
+            first_layer = module
+            break
+    
+    if first_layer is not None:
+        weights = first_layer.weight.data.cpu()
+        
+        # Separate weights for HSI and DinoSVD features
+        hsi_weights = weights[:, :hsi_dim]
+        dino_weights = weights[:, hsi_dim:]
+        
+        # Compute weight statistics
+        hsi_weight_norm = torch.norm(hsi_weights).item()
+        dino_weight_norm = torch.norm(dino_weights).item()
+        
+        hsi_weight_abs_mean = torch.abs(hsi_weights).mean().item()
+        dino_weight_abs_mean = torch.abs(dino_weights).mean().item()
+        
+        results['classifier_weights'] = {
+            'hsi_weight_norm': float(hsi_weight_norm),
+            'dino_weight_norm': float(dino_weight_norm),
+            'hsi_weight_abs_mean': float(hsi_weight_abs_mean),
+            'dino_weight_abs_mean': float(dino_weight_abs_mean),
+            'weight_norm_ratio_hsi_to_dino': float(hsi_weight_norm / dino_weight_norm),
+            'weight_mean_ratio_hsi_to_dino': float(hsi_weight_abs_mean / dino_weight_abs_mean)
+        }
+        
+        print(f"First classifier layer weights (input: {hsi_dim + dino_dim}):")
+        print(f"  HSI weights - L2 norm: {hsi_weight_norm:.4f}, mean |w|: {hsi_weight_abs_mean:.6f}")
+        print(f"  DinoSVD weights - L2 norm: {dino_weight_norm:.4f}, mean |w|: {dino_weight_abs_mean:.6f}")
+        print(f"  Weight Norm Ratio (HSI/DinoSVD): {results['classifier_weights']['weight_norm_ratio_hsi_to_dino']:.4f}")
+    
+    # 5. Per-class Analysis
+    print("\n5. PER-CLASS CONTRIBUTION ANALYSIS")
+    print("-" * 40)
+    
+    # Note: Gradient analysis uses fewer samples, so we use a subset of labels
+    num_gradient_samples = len(hsi_gradients)
+    gradient_labels = all_labels[:num_gradient_samples]
+    
+    real_mask_grad = gradient_labels == 0
+    fake_mask_grad = gradient_labels == 1
+    
+    if np.any(real_mask_grad) and np.any(fake_mask_grad):
+        results['per_class'] = {
+            'real': {
+                'hsi_gradient_mean': float(np.mean(hsi_gradients[real_mask_grad])),
+                'dino_gradient_mean': float(np.mean(dino_gradients[real_mask_grad])),
+                'hsi_contribution': float(np.mean(hsi_contribution[real_mask_grad]) * 100),
+                'dino_contribution': float(np.mean(dino_contribution[real_mask_grad]) * 100)
+            },
+            'fake': {
+                'hsi_gradient_mean': float(np.mean(hsi_gradients[fake_mask_grad])),
+                'dino_gradient_mean': float(np.mean(dino_gradients[fake_mask_grad])),
+                'hsi_contribution': float(np.mean(hsi_contribution[fake_mask_grad]) * 100),
+                'dino_contribution': float(np.mean(dino_contribution[fake_mask_grad]) * 100)
+            }
+        }
+        
+        print(f"REAL samples ({np.sum(real_mask_grad)} gradient samples):")
+        print(f"  HSI contribution: {results['per_class']['real']['hsi_contribution']:.2f}%")
+        print(f"  DinoSVD contribution: {results['per_class']['real']['dino_contribution']:.2f}%")
+        print(f"\nFAKE samples ({np.sum(fake_mask_grad)} gradient samples):")
+        print(f"  HSI contribution: {results['per_class']['fake']['hsi_contribution']:.2f}%")
+        print(f"  DinoSVD contribution: {results['per_class']['fake']['dino_contribution']:.2f}%")
+    else:
+        print(f"Skipping per-class analysis (insufficient samples per class in gradient subset)")
+    
+    # Summary
+    print("\n" + "=" * 60)
+    print("SUMMARY: Which model contributes more?")
+    print("=" * 60)
+    
+    hsi_score = 0
+    dino_score = 0
+    
+    # Based on gradient attribution
+    if results['gradient_attribution']['hsi_contribution_percent'] > results['gradient_attribution']['dino_contribution_percent']:
+        hsi_score += 1
+        print(f"✓ Gradient Attribution: HSI ({results['gradient_attribution']['hsi_contribution_percent']:.1f}%)")
+    else:
+        dino_score += 1
+        print(f"✓ Gradient Attribution: DinoSVD ({results['gradient_attribution']['dino_contribution_percent']:.1f}%)")
+    
+    # Based on ablation (higher accuracy drop = more important)
+    if results['ablation_study']['hsi_ablation_accuracy_drop'] > results['ablation_study']['dino_ablation_accuracy_drop']:
+        hsi_score += 1
+        print(f"✓ Ablation Study: HSI (removing it causes {results['ablation_study']['hsi_ablation_accuracy_drop']:.1f}% drop)")
+    else:
+        dino_score += 1
+        print(f"✓ Ablation Study: DinoSVD (removing it causes {results['ablation_study']['dino_ablation_accuracy_drop']:.1f}% drop)")
+    
+    # Based on classifier weights
+    if 'classifier_weights' in results:
+        if results['classifier_weights']['weight_norm_ratio_hsi_to_dino'] > 1:
+            hsi_score += 1
+            print(f"✓ Classifier Weights: HSI (higher weight norm)")
+        else:
+            dino_score += 1
+            print(f"✓ Classifier Weights: DinoSVD (higher weight norm)")
+    
+    print(f"\nFinal Score: HSI={hsi_score}, DinoSVD={dino_score}")
+    if hsi_score > dino_score:
+        print(">>> HSI features contribute MORE to predictions")
+    elif dino_score > hsi_score:
+        print(">>> DinoSVD features contribute MORE to predictions")
+    else:
+        print(">>> Both models contribute EQUALLY to predictions")
+    
+    results['summary'] = {
+        'hsi_score': hsi_score,
+        'dino_score': dino_score,
+        'dominant_model': 'HSI' if hsi_score > dino_score else ('DinoSVD' if dino_score > hsi_score else 'Tie')
+    }
+    
+    # Save results if path provided
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(save_path, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to: {save_path}")
+    
+    return results
 
 
 def parse_args():
@@ -96,27 +524,27 @@ def parse_args():
     parser.add_argument(
         "--hsi_encoding_dim",
         type=int,
-        default=256,
+        default=384,
         help="HSI encoder output dimension"
     )
     parser.add_argument(
         "--hsi_hidden_dims",
         type=int,
         nargs="+",
-        default=[64, 128],
+        default=[64, 128, 128],
         help="Hidden dimensions for HSI encoder CNN"
     )
     parser.add_argument(
         "--classifier_hidden_dims",
         type=int,
         nargs="+",
-        default=[256, 16],
+        default=[512, 64],
         help="Hidden dimensions for classifier head"
     )
     parser.add_argument(
         "--dropout",
         type=float,
-        default=0.2,
+        default=0.3,
         help="Dropout rate"
     )
     parser.add_argument(
@@ -147,7 +575,7 @@ def parse_args():
     parser.add_argument(
         "--keepsv_loss_weight",
         type=float,
-        default=0.01,
+        default=0.005,
         help="Weight for keepsv loss"
     )
     parser.add_argument(
@@ -160,6 +588,17 @@ def parse_args():
         type=float,
         default=0.001,
         help="Weight for weight diversity loss"
+    )
+    parser.add_argument(
+        "--use_decorrelation_loss",
+        action="store_true",
+        help="Use feature decorrelation loss between HSI and DinoSVD branches"
+    )
+    parser.add_argument(
+        "--decorrelation_loss_weight",
+        type=float,
+        default=0.005,
+        help="Weight for feature decorrelation loss"
     )
     
     # Training settings
@@ -225,6 +664,20 @@ def parse_args():
         action="store_true",
         default=False,
         help="Run evaluation only (no training)"
+    )
+    
+    parser.add_argument(
+        "--analyze_contributions",
+        action="store_true",
+        default=False,
+        help="Analyze feature contributions from HSI vs DinoSVD after loading best model"
+    )
+    
+    parser.add_argument(
+        "--num_analysis_samples",
+        type=int,
+        default=500,
+        help="Number of samples to use for contribution analysis"
     )
     
     # Early stopping
@@ -308,6 +761,8 @@ class DinoSVDHSITrainer:
         keepsv_loss_weight: float = 0.01,
         use_weight_loss: bool = False,
         weight_loss_weight: float = 0.001,
+        use_decorrelation_loss: bool = False,
+        decorrelation_loss_weight: float = 0.01,
         svd_lr: Optional[float] = None,
         hsi_lr: Optional[float] = None
     ):
@@ -322,6 +777,8 @@ class DinoSVDHSITrainer:
             keepsv_loss_weight: Weight for keepsv loss
             use_weight_loss: Whether to use weight diversity loss
             weight_loss_weight: Weight for weight diversity loss
+            use_decorrelation_loss: Whether to use feature decorrelation loss
+            decorrelation_loss_weight: Weight for decorrelation loss
             svd_lr: Separate learning rate for SVD parameters
             hsi_lr: Separate learning rate for HSI encoder parameters
         """
@@ -335,6 +792,8 @@ class DinoSVDHSITrainer:
         self.keepsv_loss_weight = keepsv_loss_weight
         self.use_weight_loss = use_weight_loss
         self.weight_loss_weight = weight_loss_weight
+        self.use_decorrelation_loss = use_decorrelation_loss
+        self.decorrelation_loss_weight = decorrelation_loss_weight
         self.svd_lr = svd_lr
         self.hsi_lr = hsi_lr
         
@@ -355,6 +814,7 @@ class DinoSVDHSITrainer:
             'train_orth_loss': [],
             'train_keepsv_loss': [],
             'train_weight_loss': [],
+            'train_decorr_loss': [],
             'train_acc': [],
             'val_loss': [],
             'val_acc': [],
@@ -411,6 +871,8 @@ class DinoSVDHSITrainer:
                 'keepsv_loss_weight': self.keepsv_loss_weight,
                 'use_weight_loss': self.use_weight_loss,
                 'weight_loss_weight': self.weight_loss_weight,
+                'use_decorrelation_loss': self.use_decorrelation_loss,
+                'decorrelation_loss_weight': self.decorrelation_loss_weight,
                 'svd_lr': self.svd_lr,
                 'hsi_lr': self.hsi_lr
             }
@@ -437,8 +899,18 @@ class DinoSVDHSITrainer:
         return params
     
     def _get_classifier_params(self, model: DinoSVD_with_HSI_Model) -> List[nn.Parameter]:
-        """Get classifier parameters."""
-        return list(model.classifier.parameters())
+        """Get classifier parameters (including learned scaling and branch norms)."""
+        params = list(model.classifier.parameters())
+        # Include learned scaling parameters and branch LayerNorms
+        if hasattr(model, 'hsi_scale') and model.hsi_scale is not None:
+            params.append(model.hsi_scale)
+        if hasattr(model, 'dino_scale') and model.dino_scale is not None:
+            params.append(model.dino_scale)
+        if hasattr(model, 'hsi_norm'):
+            params.extend(model.hsi_norm.parameters())
+        if hasattr(model, 'dino_norm'):
+            params.extend(model.dino_norm.parameters())
+        return params
     
     def _create_optimizer(self, model: DinoSVD_with_HSI_Model) -> optim.Optimizer:
         """Create optimizer with separate parameter groups."""
@@ -527,7 +999,7 @@ class DinoSVDHSITrainer:
         return nn.CrossEntropyLoss()
     
     def _compute_auxiliary_losses(self, model: DinoSVD_with_HSI_Model) -> Dict[str, torch.Tensor]:
-        """Compute auxiliary losses from the DINO SVD backbone."""
+        """Compute auxiliary losses from the DINO SVD backbone and feature decorrelation."""
         losses = {}
         
         if self.use_orthogonal_loss:
@@ -538,6 +1010,9 @@ class DinoSVDHSITrainer:
         
         if self.use_weight_loss:
             losses['weight'] = model.dino_svd.compute_weight_loss() * self.weight_loss_weight
+        
+        if self.use_decorrelation_loss:
+            losses['decorrelation'] = model.compute_decorrelation_loss() * self.decorrelation_loss_weight
         
         return losses
     
@@ -579,6 +1054,7 @@ class DinoSVDHSITrainer:
         total_orth_loss = 0
         total_keepsv_loss = 0
         total_weight_loss = 0
+        total_decorr_loss = 0
         correct = 0
         total = 0
         
@@ -619,6 +1095,8 @@ class DinoSVDHSITrainer:
                     total_keepsv_loss += loss_value.item()
                 elif loss_name == 'weight':
                     total_weight_loss += loss_value.item()
+                elif loss_name == 'decorrelation':
+                    total_decorr_loss += loss_value.item()
             
             # Backward pass
             loss.backward()
@@ -651,6 +1129,7 @@ class DinoSVDHSITrainer:
             'orth_loss': total_orth_loss / n_batches if self.use_orthogonal_loss else 0,
             'keepsv_loss': total_keepsv_loss / n_batches if self.use_keepsv_loss else 0,
             'weight_loss': total_weight_loss / n_batches if self.use_weight_loss else 0,
+            'decorr_loss': total_decorr_loss / n_batches if self.use_decorrelation_loss else 0,
             'acc': 100 * correct / total
         }
     
@@ -878,6 +1357,7 @@ class DinoSVDHSITrainer:
             self.history['train_orth_loss'].append(train_metrics['orth_loss'])
             self.history['train_keepsv_loss'].append(train_metrics['keepsv_loss'])
             self.history['train_weight_loss'].append(train_metrics['weight_loss'])
+            self.history['train_decorr_loss'].append(train_metrics['decorr_loss'])
             self.history['train_acc'].append(train_metrics['acc'])
             self.history['val_loss'].append(val_metrics['loss'])
             self.history['val_acc'].append(val_metrics['acc'])
@@ -908,7 +1388,7 @@ class DinoSVDHSITrainer:
             print(f"  Train - Loss: {train_metrics['loss']:.4f}, "
                   f"CE: {train_metrics['ce_loss']:.4f}, "
                   f"Acc: {train_metrics['acc']:.2f}%")
-            if self.use_orthogonal_loss or self.use_keepsv_loss or self.use_weight_loss:
+            if self.use_orthogonal_loss or self.use_keepsv_loss or self.use_weight_loss or self.use_decorrelation_loss:
                 aux_str = "  Aux Losses -"
                 if self.use_orthogonal_loss:
                     aux_str += f" Orth: {train_metrics['orth_loss']:.4f}"
@@ -916,6 +1396,8 @@ class DinoSVDHSITrainer:
                     aux_str += f" KeepSV: {train_metrics['keepsv_loss']:.4f}"
                 if self.use_weight_loss:
                     aux_str += f" Weight: {train_metrics['weight_loss']:.4f}"
+                if self.use_decorrelation_loss:
+                    aux_str += f" Decorr: {train_metrics['decorr_loss']:.4f}"
                 print(aux_str)
             print(f"  Val   - Loss: {val_metrics['loss']:.4f}, "
                   f"Acc: {val_metrics['acc']:.2f}%, "
@@ -1045,7 +1527,7 @@ def main():
     print(f"  SVD Learning Rate: {args.svd_lr or args.lr}")
     print(f"  HSI Learning Rate: {args.hsi_lr or args.lr}")
     
-    if args.use_orthogonal_loss or args.use_keepsv_loss or args.use_weight_loss:
+    if args.use_orthogonal_loss or args.use_keepsv_loss or args.use_weight_loss or args.use_decorrelation_loss:
         print(f"\nAuxiliary Losses:")
         if args.use_orthogonal_loss:
             print(f"  Orthogonal Loss: weight={args.orthogonal_loss_weight}")
@@ -1053,6 +1535,8 @@ def main():
             print(f"  KeepSV Loss: weight={args.keepsv_loss_weight}")
         if args.use_weight_loss:
             print(f"  Weight Loss: weight={args.weight_loss_weight}")
+        if args.use_decorrelation_loss:
+            print(f"  Decorrelation Loss: weight={args.decorrelation_loss_weight}")
     
     print()
     
@@ -1096,8 +1580,13 @@ def main():
         hsi_encoding_dim=args.hsi_encoding_dim,
         hsi_hidden_dims=args.hsi_hidden_dims,
         classifier_hidden_dims=args.classifier_hidden_dims,
-        dropout=args.dropout
+        dropout=args.dropout,
+        dino_model=args.dino_model,
+        svd_rank=args.svd_rank,
+        target_modules=args.target_modules,
     )
+
+    model.hsi_encoder.RGB2HSI.eval()
     
     # Note: The DinoSVD_with_HSI_Model internally creates DinoSVDModel
     # We need to ensure SVD rank and target modules are set properly
@@ -1114,6 +1603,8 @@ def main():
         keepsv_loss_weight=args.keepsv_loss_weight,
         use_weight_loss=args.use_weight_loss,
         weight_loss_weight=args.weight_loss_weight,
+        use_decorrelation_loss=args.use_decorrelation_loss,
+        decorrelation_loss_weight=args.decorrelation_loss_weight,
         svd_lr=args.svd_lr,
         hsi_lr=args.hsi_lr
     )
@@ -1143,10 +1634,7 @@ def main():
         map_location=trainer.device
     )
     model.load_state_dict(best_checkpoint['model_state_dict'])
-    model = model.to(trainer.device)
-    
-    # Set RGB2HSI to eval mode for evaluation
-    model.hsi_encoder.RGB2HSI.eval()
+    model = model.to(trainer.device)    
 
     print("\nEvaluating on test set...")
     test_metrics = trainer._validate(model, test_loader, trainer._create_criterion(train_loader))
@@ -1159,6 +1647,22 @@ def main():
     print(f"Confusion Matrix:")
     print(f"  TN={test_metrics['confusion_matrix'][0,0]:5d}  FP={test_metrics['confusion_matrix'][0,1]:5d}")
     print(f"  FN={test_metrics['confusion_matrix'][1,0]:5d}  TP={test_metrics['confusion_matrix'][1,1]:5d}")
+
+    # Run contribution analysis if requested
+    if args.analyze_contributions:
+        print("\n" + "=" * 60)
+        print("Running Feature Contribution Analysis...")
+        print("=" * 60)
+        
+        analysis_save_path = trainer.log_dir / "feature_contribution_analysis.json"
+        
+        contribution_results = analyze_feature_contributions(
+            model=model,
+            test_loader=test_loader,
+            device=trainer.device,
+            num_samples=args.num_analysis_samples,
+            save_path=analysis_save_path
+        )
 
 
 if __name__ == "__main__":

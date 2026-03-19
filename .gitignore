@@ -7,3 +7,4 @@ checkpoints/
 *.log
 *.png
 *.pth
+*.pt

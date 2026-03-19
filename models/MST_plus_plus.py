@@ -292,6 +292,6 @@ class MST_Plus_Plus(nn.Module):
         h += x
         return h[:, :, :h_inp, :w_inp]
 
-    def required_grad_(self, requires_grad=True):
+    def required_grad_(self, requires_grad=False):
         for param in self.parameters():
             param.requires_grad = requires_grad

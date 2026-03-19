@@ -151,6 +151,58 @@ class GaussianBlur:
         return image
 
 
+class GaussianNoise:
+    """Add random Gaussian noise to image."""
+    
+    def __init__(self, std_range: Tuple[float, float] = (1.0, 10.0), p: float = 0.3):
+        self.std_range = std_range
+        self.p = p
+    
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        if np.random.random() < self.p:
+            std = np.random.uniform(*self.std_range)
+            noise = np.random.normal(0, std, image.shape).astype(np.float32)
+            image = np.clip(image.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+        return image
+
+
+class RandomDownscale:
+    """Randomly downscale then upscale to simulate resolution mismatch across datasets."""
+    
+    def __init__(self, scale_range: Tuple[float, float] = (0.5, 0.9), p: float = 0.3):
+        self.scale_range = scale_range
+        self.p = p
+    
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        if np.random.random() < self.p:
+            h, w = image.shape[:2]
+            scale = np.random.uniform(*self.scale_range)
+            new_h, new_w = int(h * scale), int(w * scale)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            image = cv2.resize(image, (w, h), interpolation=cv2.INTER_LINEAR)
+        return image
+
+
+class RandomCutout:
+    """Randomly erase rectangular regions to reduce reliance on local cues."""
+    
+    def __init__(self, num_patches: int = 1, size_range: Tuple[float, float] = (0.05, 0.15), p: float = 0.3):
+        self.num_patches = num_patches
+        self.size_range = size_range
+        self.p = p
+    
+    def __call__(self, image: np.ndarray) -> np.ndarray:
+        if np.random.random() < self.p:
+            h, w = image.shape[:2]
+            for _ in range(self.num_patches):
+                sz_h = int(h * np.random.uniform(*self.size_range))
+                sz_w = int(w * np.random.uniform(*self.size_range))
+                y = np.random.randint(0, max(1, h - sz_h))
+                x = np.random.randint(0, max(1, w - sz_w))
+                image[y:y+sz_h, x:x+sz_w] = np.random.randint(0, 256, dtype=np.uint8)
+        return image
+
+
 class JPEGCompression:
     """Simulate JPEG compression artifacts."""
     
@@ -187,9 +239,12 @@ def get_train_transforms(config: Optional[TransformConfig] = None) -> Compose:
     if config.use_augmentation:
         transforms.extend([
             RandomHorizontalFlip(config.horizontal_flip_prob),
-            ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05),
-            GaussianBlur(kernel_size=3, p=0.1),
-            JPEGCompression(quality_range=(80, 100), p=0.1),
+            RandomRotation(max_angle=5),
+            ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10),
+            GaussianBlur(kernel_size=3, p=0.2),
+            RandomDownscale(scale_range=(0.5, 0.9), p=0.3),
+            JPEGCompression(quality_range=(60, 100), p=0.3),
+            RandomCutout(num_patches=1, size_range=(0.05, 0.12), p=0.2),
         ])
     
     transforms.extend([

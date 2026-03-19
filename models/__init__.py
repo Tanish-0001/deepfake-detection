@@ -5,6 +5,7 @@ from .dino_model import DinoModel
 from .dino_temporal_model import DinoTemporalModel
 from .autoencoder_detector import AutoencoderDetector, LatentAutoencoder, intervention_cost
 from .dino_svd_model import DinoSVDModel, SVDResidualLinear
+from .DinoSVD_MSTPP import DinoSVD_MSTPP_Model
 
 __all__ = [
     'BaseModel',
@@ -17,6 +18,7 @@ __all__ = [
     'intervention_cost',
     'DinoSVDModel',
     'SVDResidualLinear',
+    'DinoSVD_MSTPP_Model',
     'get_model'
 ]
 
@@ -39,7 +41,8 @@ def get_model(model_name: str, **kwargs):
         'dino_model': DinoModel,
         'dino_temporal_model': DinoTemporalModel,
         'autoencoder_detector': AutoencoderDetector,
-        'dino_svd': DinoSVDModel
+        'dino_svd': DinoSVDModel,
+        'dino_svd_mstpp': DinoSVD_MSTPP_Model
     }
     
     if model_name not in models:
