@@ -686,15 +686,13 @@ class DinoSVDMSTPPTrainer:
     
     def _load_checkpoint(self, model: nn.Module, optimizer: optim.Optimizer,
                          scheduler, checkpoint_path: str):
-        """Load a checkpoint."""
+        """Load a checkpoint. Returns (optimizer, scheduler) since they may be rebuilt."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
+        # Load model weights first
         model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
-        if scheduler and checkpoint['scheduler_state_dict']:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
+        # Restore metadata before rebuilding optimizer
         self.current_epoch = checkpoint['epoch'] + 1
         self.best_val_loss = checkpoint['best_val_loss']
         self.best_val_acc = checkpoint.get('best_val_acc', 0.0)
@@ -702,13 +700,25 @@ class DinoSVDMSTPPTrainer:
         self.history = checkpoint.get('history', self.history)
         self.dino_unfrozen = checkpoint.get('dino_unfrozen', False)
         
-        # If dino was already unfrozen in the checkpoint, re-unfreeze it
+        # If dino was unfrozen when the checkpoint was saved, we need to
+        # unfreeze it and rebuild the optimizer with the matching param groups
+        # BEFORE loading the optimizer state dict (PyTorch requires the number
+        # of param groups to match exactly).
         if self.dino_unfrozen:
             model.unfreeze_dino()
+            optimizer = self._create_optimizer_with_dino(model)
+        
+        # Now the optimizer has the same number of param groups as the checkpoint
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        if scheduler and checkpoint['scheduler_state_dict']:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         
         print(f"Resumed from epoch {self.current_epoch} (Val accuracy: {self.best_val_acc})")
         if self.dino_unfrozen:
             print(f"  DinoSVD was already unfrozen in checkpoint")
+        
+        return optimizer, scheduler
     
     def _save_history(self):
         """Save training history to file."""
@@ -755,7 +765,7 @@ class DinoSVDMSTPPTrainer:
         
         # Resume from checkpoint if specified
         if resume_from:
-            self._load_checkpoint(model, optimizer, scheduler, resume_from)
+            optimizer, scheduler = self._load_checkpoint(model, optimizer, scheduler, resume_from)
         
         print(f"\nStarting training for {self.training_config.num_epochs} epochs")
         print(f"Training samples: {len(train_loader.dataset)}")

@@ -17,7 +17,9 @@ class HSICompressor(nn.Module):
     imagery down to 3 channels suitable for input to a pretrained
     RGB backbone (DinoSVD).
 
-    Architecture: 31 → 16 → 8 → 3  (Conv3×3 + BN + ReLU each layer)
+    Architecture: 31 → 16 → 8 → 3  (Conv3×3 + BN + ReLU)
+    Final layer omits ReLU so output can span the full value range
+    needed for downstream ImageNet-normalised input to DINO.
     No spatial pooling — preserves full resolution.
     """
 
@@ -32,9 +34,9 @@ class HSICompressor(nn.Module):
             nn.BatchNorm2d(8),
             nn.ReLU(inplace=True),
 
+            # Final layer: BN but NO ReLU — output must span full range
             nn.Conv2d(8, 3, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(3),
-            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
@@ -68,6 +70,16 @@ class DinoSVD_MSTPP_Model(nn.Module):
         target_modules: List[str] = None,
     ):
         super(DinoSVD_MSTPP_Model, self).__init__()
+
+        # ---- ImageNet normalisation constants (registered as buffers) ----
+        self.register_buffer(
+            '_img_mean',
+            torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1),
+        )
+        self.register_buffer(
+            '_img_std',
+            torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1),
+        )
 
         # ---- 1. MST++: RGB → 31ch HSI (frozen) ----
         self.rgb2hsi = MST_Plus_Plus(in_channels=3, out_channels=31)
@@ -121,22 +133,30 @@ class DinoSVD_MSTPP_Model(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (B, 3, H, W) RGB image
+            x: (B, 3, H, W) ImageNet-normalised RGB image
         Returns:
             (B, num_classes) logits
         """
+        # ---- Un-normalise to [0, 1] for MST++ ----
+        # MST++ was trained on [0, 1] RGB; our dataloader delivers
+        # ImageNet-normalised images, so we reverse that first.
+        x_rgb = x * self._img_std + self._img_mean          # → [0, 1]
+
         # MST++ (frozen) — no grad needed, nothing before it needs gradients
         with torch.no_grad():
-            hsi = self.rgb2hsi(x)           # (B, 31, H, W)
+            hsi = self.rgb2hsi(x_rgb)                        # (B, 31, H, W)
 
         # Compressor (trainable) — grad flows here
-        pseudo_rgb = self.compressor(hsi)    # (B, 3, H, W)
+        pseudo_rgb = self.compressor(hsi)                    # (B, 3, H, W)
+
+        # ---- Re-normalise to ImageNet distribution for DINO ----
+        pseudo_rgb = (pseudo_rgb - self._img_mean) / self._img_std
 
         # DinoSVD feature extraction (frozen weights via requires_grad=False)
         # NOTE: Do NOT use torch.no_grad() here — we need the computation graph
         # so that gradients can flow THROUGH DinoSVD back to the compressor.
         # The frozen weights won't accumulate gradients, but the graph is needed.
-        features = self.dino_svd.get_features(pseudo_rgb)  # (B, feat_dim)
+        features = self.dino_svd.get_features(pseudo_rgb)    # (B, feat_dim)
 
         # Classifier (trainable)
         logits = self.classifier(features)

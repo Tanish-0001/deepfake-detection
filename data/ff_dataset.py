@@ -239,9 +239,7 @@ class FFDataset(Dataset):
                 print(f"Warning: Could not cache {video_path}: {e}")
         
         return faces
-        
-        return faces
-    
+            
     def __len__(self) -> int:
         """Return total number of samples."""
         return len(self.sample_index)
