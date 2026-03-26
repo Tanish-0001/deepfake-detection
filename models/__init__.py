@@ -6,6 +6,8 @@ from .dino_temporal_model import DinoTemporalModel
 from .autoencoder_detector import AutoencoderDetector, LatentAutoencoder, intervention_cost
 from .dino_svd_model import DinoSVDModel, SVDResidualLinear
 from .DinoSVD_MSTPP import DinoSVD_MSTPP_Model
+from .DinoSVD_HSI_CrossAttention import DinoSVD_HSI_CrossAttention_Model
+from .DinoSVD_SpectralAdapter import DinoSVD_SpectralAdapter_Model
 
 __all__ = [
     'BaseModel',
@@ -19,6 +21,8 @@ __all__ = [
     'DinoSVDModel',
     'SVDResidualLinear',
     'DinoSVD_MSTPP_Model',
+    'DinoSVD_HSI_CrossAttention_Model',
+    'DinoSVD_SpectralAdapter_Model',
     'get_model'
 ]
 
@@ -42,7 +46,9 @@ def get_model(model_name: str, **kwargs):
         'dino_temporal_model': DinoTemporalModel,
         'autoencoder_detector': AutoencoderDetector,
         'dino_svd': DinoSVDModel,
-        'dino_svd_mstpp': DinoSVD_MSTPP_Model
+        'dino_svd_mstpp': DinoSVD_MSTPP_Model,
+        'dino_svd_hsi_crossattn': DinoSVD_HSI_CrossAttention_Model,
+        'dino_svd_spectral_adapter': DinoSVD_SpectralAdapter_Model
     }
     
     if model_name not in models:
