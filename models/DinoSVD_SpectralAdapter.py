@@ -409,6 +409,48 @@ class DinoSVD_SpectralAdapter_Model(nn.Module):
         )
         print(f"DinoSVD unfrozen: {trainable:,} parameters now trainable")
 
+    def unfreeze_dino_stage(self, stage: int):
+        """
+        Unfreeze portions of the DinoSVD backbone progressively.
+        stage=0: Last 4 blocks + final norm
+        stage=1: Middle 4 blocks
+        stage=2: First 4 blocks + patch embed + cls token + pos embed
+        """
+        blocks = self.dino_svd.backbone.blocks
+        num_blocks = len(blocks)
+        
+        if stage == 0:
+            for block in blocks[-4:]:
+                block.requires_grad_(True)
+            if hasattr(self.dino_svd.backbone, 'norm'):
+                self.dino_svd.backbone.norm.requires_grad_(True)
+            print(f"DinoSVD Stage 0 unfrozen: Last 4 blocks out of {num_blocks}")
+            
+        elif stage == 1:
+            for block in blocks[-8:-4]:
+                block.requires_grad_(True)
+            print(f"DinoSVD Stage 1 unfrozen: Blocks [-8:-4] out of {num_blocks}")
+            
+        elif stage == 2:
+            for block in blocks[:-8]:
+                block.requires_grad_(True)
+            if hasattr(self.dino_svd.backbone, 'patch_embed'):
+                self.dino_svd.backbone.patch_embed.requires_grad_(True)
+            if hasattr(self.dino_svd.backbone, 'cls_token'):
+                if hasattr(self.dino_svd.backbone.cls_token, 'requires_grad_'):
+                    self.dino_svd.backbone.cls_token.requires_grad_(True)
+                else:
+                    self.dino_svd.backbone.cls_token.requires_grad = True
+            if hasattr(self.dino_svd.backbone, 'pos_embed'):
+                if hasattr(self.dino_svd.backbone.pos_embed, 'requires_grad_'):
+                    self.dino_svd.backbone.pos_embed.requires_grad_(True)
+                else:
+                    self.dino_svd.backbone.pos_embed.requires_grad = True
+            print(f"DinoSVD Stage 2 unfrozen: Remaining {max(0, num_blocks-8)} first blocks and embeddings")
+            
+        trainable = sum(p.numel() for p in self.dino_svd.parameters() if p.requires_grad)
+        print(f"DinoSVD incrementally unfrozen: {trainable:,} parameters now trainable")
+
     def print_trainable_params(self):
         """Print trainable vs total parameter counts."""
         total = sum(p.numel() for p in self.parameters())

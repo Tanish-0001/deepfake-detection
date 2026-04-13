@@ -27,7 +27,7 @@ import time
 import sys
 from pathlib import Path
 from dataclasses import asdict
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from tqdm import tqdm
 
 import numpy as np
@@ -139,6 +139,10 @@ def parse_args():
         help="Epoch after which to unfreeze DinoSVD (used with --finetune_dino)"
     )
     parser.add_argument(
+        "--unfreeze_schedule", type=int, nargs="+", default=[25, 30, 35],
+        help="Epochs to progressively unfreeze DinoSVD stages (last 4, middle 4, first 4 blocks)"
+    )
+    parser.add_argument(
         "--dino_lr", type=float, default=1e-5,
         help="Learning rate for DinoSVD backbone after unfreezing"
     )
@@ -153,6 +157,7 @@ def parse_args():
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/spectral_adapter")
     parser.add_argument("--log_dir", type=str, default="logs/spectral_adapter")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--eval_only", action="store_true", default=False, help="Run evaluation only (no training)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     return parser.parse_args()
@@ -168,6 +173,7 @@ class SpectralAdapterTrainer:
         tokenizer_lr: Optional[float] = None,
         finetune_dino: bool = False,
         unfreeze_after: int = 10,
+        unfreeze_schedule: List[int] = None,
         dino_lr: float = 1e-5,
     ):
         self.config = config
@@ -176,8 +182,9 @@ class SpectralAdapterTrainer:
         self.tokenizer_lr = tokenizer_lr
         self.finetune_dino = finetune_dino
         self.unfreeze_after = unfreeze_after
+        self.unfreeze_schedule = unfreeze_schedule if unfreeze_schedule is not None else []
         self.dino_lr = dino_lr
-        self.dino_unfrozen = False
+        self.unfrozen_stages = set()
 
         self.device = self._setup_device()
 
@@ -185,6 +192,7 @@ class SpectralAdapterTrainer:
         self.best_val_loss = float('inf')
         self.best_val_acc = 0.0
         self.best_val_auc = 0.0
+        self.best_threshold = 0.5
         self.epochs_without_improvement = 0
 
         self.history = {
@@ -229,6 +237,7 @@ class SpectralAdapterTrainer:
                 'tokenizer_lr': self.tokenizer_lr,
                 'finetune_dino': self.finetune_dino,
                 'unfreeze_after': self.unfreeze_after,
+                'unfreeze_schedule': self.unfreeze_schedule,
                 'dino_lr': self.dino_lr,
             }
         }
@@ -264,6 +273,26 @@ class SpectralAdapterTrainer:
             return optim.SGD(parameters, momentum=0.9)
         else:
             raise ValueError(f"Unknown optimizer: {opt_name}")
+
+    def _add_new_dino_params_to_optimizer(self, model: DinoSVD_SpectralAdapter_Model, optimizer: optim.Optimizer):
+        existing_params = set()
+        for group in optimizer.param_groups:
+            for p in group['params']:
+                existing_params.add(p)
+                
+        new_dino_params = [
+            p for p in model.dino_svd.parameters()
+            if p.requires_grad and p not in existing_params
+        ]
+        
+        if new_dino_params:
+            optimizer.add_param_group({
+                'params': new_dino_params,
+                'lr': self.dino_lr,
+                'weight_decay': self.training_config.weight_decay,
+                'name': f'dino_svd_stage_{len(optimizer.param_groups)}'
+            })
+            print(f"Added param group for {len(new_dino_params)} newly unfrozen DinoSVD tensors.")
 
     def _create_optimizer_with_dino(self, model: DinoSVD_SpectralAdapter_Model) -> optim.Optimizer:
         """Rebuild optimizer adding DinoSVD params at a small learning rate."""
@@ -399,9 +428,9 @@ class SpectralAdapterTrainer:
         return {'loss': total_loss / len(train_loader), 'acc': 100 * correct / total}
 
     @torch.no_grad()
-    def _validate(self, model, val_loader, criterion):
+    def _validate(self, model, val_loader, criterion, threshold=None):
         model.eval()
-        total_loss, all_labels, all_preds, all_probs = 0, [], [], []
+        total_loss, all_labels, all_probs = 0, [], []
 
         for batch in tqdm(val_loader, desc="Validating", leave=False):
             images, labels = batch[0].to(self.device), batch[1].to(self.device)
@@ -417,21 +446,30 @@ class SpectralAdapterTrainer:
             total_loss += loss.item()
 
             probs = torch.softmax(logits, dim=1)[:, 1]
-            _, predicted = torch.max(logits, 1)
 
             if images.dim() == 5:
                 probs = probs.view(B, T).mean(dim=1)
-                predicted = (probs > 0.5).long()
                 all_labels.extend(labels.cpu().numpy())
             else:
                 all_labels.extend(labels_expanded.cpu().numpy())
 
-            all_preds.extend(predicted.cpu().numpy())
             all_probs.extend(probs.cpu().numpy())
 
         all_labels = np.array(all_labels)
-        all_preds = np.array(all_preds)
         all_probs = np.array(all_probs)
+
+        if threshold is None:
+            best_f1 = -1.0
+            best_threshold = 0.5
+            for th in np.arange(0.1, 0.91, 0.01):
+                preds = (all_probs >= th).astype(int)
+                f1 = f1_score(all_labels, preds, zero_division=0)
+                if f1 > best_f1:
+                    best_f1 = f1
+                    best_threshold = th
+            threshold = float(best_threshold)
+
+        all_preds = (all_probs >= threshold).astype(int)
 
         acc = accuracy_score(all_labels, all_preds) * 100
         try:
@@ -445,7 +483,8 @@ class SpectralAdapterTrainer:
             'precision': precision_score(all_labels, all_preds, zero_division=0),
             'recall': recall_score(all_labels, all_preds, zero_division=0),
             'f1': f1_score(all_labels, all_preds, zero_division=0),
-            'confusion_matrix': confusion_matrix(all_labels, all_preds)
+            'confusion_matrix': confusion_matrix(all_labels, all_preds),
+            'threshold': threshold
         }
 
     def _save_checkpoint(self, model, optimizer, scheduler, is_best=False, filename=None):
@@ -457,8 +496,9 @@ class SpectralAdapterTrainer:
             'best_val_loss': self.best_val_loss,
             'best_val_acc': self.best_val_acc,
             'best_val_auc': self.best_val_auc,
+            'best_threshold': self.best_threshold,
             'history': self.history,
-            'dino_unfrozen': self.dino_unfrozen,
+            'unfrozen_stages': list(self.unfrozen_stages),
         }
 
         if filename is None:
@@ -479,12 +519,19 @@ class SpectralAdapterTrainer:
         self.best_val_loss = checkpoint['best_val_loss']
         self.best_val_acc = checkpoint.get('best_val_acc', 0.0)
         self.best_val_auc = checkpoint.get('best_val_auc', 0.0)
+        self.best_threshold = checkpoint.get('best_threshold', 0.5)
         self.history = checkpoint.get('history', self.history)
-        self.dino_unfrozen = checkpoint.get('dino_unfrozen', False)
+        self.unfrozen_stages = set(checkpoint.get('unfrozen_stages', []))
 
-        if self.dino_unfrozen:
+        # Backwards compatibility check
+        if checkpoint.get('dino_unfrozen', False) and not self.unfrozen_stages:
             model.unfreeze_dino()
             optimizer = self._create_optimizer_with_dino(model)
+            self.unfrozen_stages = {0}
+        else:
+            for stage in sorted(list(self.unfrozen_stages)):
+                model.unfreeze_dino_stage(stage)
+                self._add_new_dino_params_to_optimizer(model, optimizer)
 
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
@@ -492,8 +539,8 @@ class SpectralAdapterTrainer:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
         print(f"Resumed from epoch {self.current_epoch} (Val accuracy: {self.best_val_acc:.2f}%)")
-        if self.dino_unfrozen:
-            print(f"  DinoSVD was already unfrozen in checkpoint")
+        if self.unfrozen_stages:
+            print(f"  DinoSVD stages {list(self.unfrozen_stages)} were already unfrozen in checkpoint")
 
         return optimizer, scheduler
 
@@ -532,18 +579,32 @@ class SpectralAdapterTrainer:
             epoch_start = time.time()
 
             # Check if we should unfreeze DinoSVD this epoch
-            if self.finetune_dino and not self.dino_unfrozen and epoch >= self.unfreeze_after:
-                print(f"\n{'='*60}")
-                print(f"Unfreezing DinoSVD at epoch {epoch + 1}")
-                print(f"{'='*60}")
-                model.unfreeze_dino()
-                self.dino_unfrozen = True
+            if self.finetune_dino:
+                unfreeze_triggered = False
+                
+                if self.unfreeze_schedule:
+                    for stage_idx, target_epoch in enumerate(self.unfreeze_schedule):
+                        # Epochs loop is 0-indexed, display is 1-indexed. Target epoch matches display.
+                        if (epoch + 1) >= target_epoch and stage_idx not in self.unfrozen_stages:
+                            print(f"\n{'='*60}")
+                            print(f"Unfreezing DinoSVD Stage {stage_idx} at epoch {epoch + 1}")
+                            print(f"{'='*60}")
+                            model.unfreeze_dino_stage(stage_idx)
+                            self.unfrozen_stages.add(stage_idx)
+                            unfreeze_triggered = True
 
-                optimizer = self._create_optimizer_with_dino(model)
-                remaining_steps = len(train_loader) * (self.training_config.num_epochs - epoch)
-                scheduler = self._create_scheduler(optimizer, remaining_steps)
-                self.epochs_without_improvement = 0
-                model.print_trainable_params()
+                elif not self.unfrozen_stages and epoch >= self.unfreeze_after:
+                    print(f"\n{'='*60}")
+                    print(f"Unfreezing DinoSVD entirely at epoch {epoch + 1}")
+                    print(f"{'='*60}")
+                    model.unfreeze_dino()
+                    self.unfrozen_stages.add(0)
+                    unfreeze_triggered = True
+                
+                if unfreeze_triggered:
+                    self._add_new_dino_params_to_optimizer(model, optimizer)
+                    self.epochs_without_improvement = 0
+                    model.print_trainable_params()
 
             # Train & validate
             train_metrics = self._train_epoch(
@@ -573,6 +634,7 @@ class SpectralAdapterTrainer:
                 self.best_val_auc = val_metrics['auc']
                 self.best_val_acc = val_metrics['acc']
                 self.best_val_loss = val_metrics['loss']
+                self.best_threshold = val_metrics['threshold']
                 self.epochs_without_improvement = 0
             else:
                 self.epochs_without_improvement += 1
@@ -590,7 +652,8 @@ class SpectralAdapterTrainer:
                 f"Val Loss: {val_metrics['loss']:.4f} "
                 f"Acc: {val_metrics['acc']:.2f}% "
                 f"AUC: {val_metrics['auc']:.4f} "
-                f"F1: {val_metrics['f1']:.4f}"
+                f"F1: {val_metrics['f1']:.4f} "
+                f"(Thresh: {val_metrics['threshold']:.2f})"
                 f"{' ★' if is_best else ''}"
             )
             print(f"  CM:")
@@ -614,8 +677,10 @@ class SpectralAdapterTrainer:
             if best_ckpt.exists():
                 ckpt = torch.load(best_ckpt, map_location=self.device)
                 model.load_state_dict(ckpt['model_state_dict'])
-            test_metrics = self._validate(model, test_loader, criterion)
-            print(f"\nTest Results:")
+                if 'best_threshold' in ckpt:
+                    self.best_threshold = ckpt['best_threshold']
+            test_metrics = self._validate(model, test_loader, criterion, threshold=self.best_threshold)
+            print(f"\nTest Results (Threshold: {self.best_threshold:.4f}):")
             print(f"  Accuracy:  {test_metrics['acc']:.2f}%")
             print(f"  AUC:       {test_metrics['auc']:.4f}")
             print(f"  Precision: {test_metrics['precision']:.4f}")
@@ -711,16 +776,40 @@ def main():
         tokenizer_lr=args.tokenizer_lr,
         finetune_dino=args.finetune_dino,
         unfreeze_after=args.unfreeze_after,
+        unfreeze_schedule=args.unfreeze_schedule,
         dino_lr=args.dino_lr,
     )
 
-    trainer.train(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        test_loader=test_loader,
-        resume_from=args.resume,
+    if not args.eval_only:
+        trainer.train(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            resume_from=args.resume,
+        )
+
+    # Load best checkpoint for final evaluation
+    best_checkpoint = torch.load(
+        trainer.checkpoint_dir / 'checkpoint_best_spectral_adapter.pt',
+        map_location=trainer.device
     )
+    model.load_state_dict(best_checkpoint['model_state_dict'])
+    model = model.to(trainer.device)
+
+    best_threshold = best_checkpoint.get('best_threshold', 0.5)
+
+    print(f"\nEvaluating on test set (Threshold: {best_threshold:.4f})...")
+    test_metrics = trainer._validate(model, test_loader, trainer._create_criterion(train_loader), threshold=best_threshold)
+    print(f"Test - Loss: {test_metrics['loss']:.4f}, "
+          f"Acc: {test_metrics['acc']:.2f}%, "
+          f"AUC: {test_metrics['auc']:.4f}")
+    print(f"       P: {test_metrics['precision']:.4f}, "
+          f"R: {test_metrics['recall']:.4f}, "
+          f"F1: {test_metrics['f1']:.4f}")
+    print(f"Confusion Matrix:")
+    print(f"  TN={test_metrics['confusion_matrix'][0,0]:5d}  FP={test_metrics['confusion_matrix'][0,1]:5d}")
+    print(f"  FN={test_metrics['confusion_matrix'][1,0]:5d}  TP={test_metrics['confusion_matrix'][1,1]:5d}")
 
 
 if __name__ == "__main__":

@@ -150,6 +150,7 @@ def parse_args():
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints/dino_svd_crossattn")
     parser.add_argument("--log_dir", type=str, default="logs/dino_svd_crossattn")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from")
+    parser.add_argument("--eval_only", action="store_true", default=False, help="Run evaluation only (no training)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     
     return parser.parse_args()
@@ -506,7 +507,29 @@ def main():
         finetune_dino=args.finetune_dino, unfreeze_after=args.unfreeze_after, dino_lr=args.dino_lr
     )
     
-    trainer.train(model=model, train_loader=train_loader, val_loader=val_loader, test_loader=test_loader, resume_from=args.resume)
+    if not args.eval_only:
+        trainer.train(model=model, train_loader=train_loader, val_loader=val_loader, test_loader=test_loader, resume_from=args.resume)
+
+    # Load best checkpoint for final evaluation
+    best_checkpoint = torch.load(
+        trainer.checkpoint_dir / 'checkpoint_best_crossattn.pt',
+        map_location=trainer.device
+    )
+    model.load_state_dict(best_checkpoint['model_state_dict'])
+    model = model.to(trainer.device)
+
+    print("\nEvaluating on test set...")
+    test_metrics = trainer._validate(model, test_loader, trainer._create_criterion(train_loader))
+    print(f"Test - Loss: {test_metrics['loss']:.4f}, "
+          f"Acc: {test_metrics['acc']:.2f}%, "
+          f"AUC: {test_metrics['auc']:.4f}")
+    print(f"       P: {test_metrics['precision']:.4f}, "
+          f"R: {test_metrics['recall']:.4f}, "
+          f"F1: {test_metrics['f1']:.4f}")
+    print(f"Confusion Matrix:")
+    print(f"  TN={test_metrics['confusion_matrix'][0,0]:5d}  FP={test_metrics['confusion_matrix'][0,1]:5d}")
+    print(f"  FN={test_metrics['confusion_matrix'][1,0]:5d}  TP={test_metrics['confusion_matrix'][1,1]:5d}")
+
 
 if __name__ == "__main__":
     main()

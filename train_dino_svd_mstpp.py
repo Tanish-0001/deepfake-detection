@@ -101,7 +101,7 @@ def parse_args():
     parser.add_argument(
         "--dropout",
         type=float,
-        default=0.1,
+        default=0.3,
         help="Dropout rate"
     )
     parser.add_argument(
@@ -182,6 +182,18 @@ def parse_args():
         type=float,
         default=1e-5,
         help="Learning rate for DinoSVD backbone after unfreezing"
+    )
+    parser.add_argument(
+        "--ortho_weight",
+        type=float,
+        default=0.1,
+        help="Weight for SVD orthogonality regularization loss (used when DinoSVD is unfrozen)"
+    )
+    parser.add_argument(
+        "--keepsv_weight",
+        type=float,
+        default=0.01,
+        help="Weight for SVD singular value preservation loss (used when DinoSVD is unfrozen)"
     )
     
     parser.add_argument(
@@ -267,6 +279,8 @@ class DinoSVDMSTPPTrainer:
         finetune_dino: bool = False,
         unfreeze_after: int = 10,
         dino_lr: float = 1e-5,
+        ortho_weight: float = 0.1,
+        keepsv_weight: float = 0.01,
     ):
         self.config = config
         self.training_config = config.training
@@ -274,6 +288,8 @@ class DinoSVDMSTPPTrainer:
         self.finetune_dino = finetune_dino
         self.unfreeze_after = unfreeze_after
         self.dino_lr = dino_lr
+        self.ortho_weight = ortho_weight
+        self.keepsv_weight = keepsv_weight
         self.dino_unfrozen = False
         
         # Set device
@@ -445,10 +461,10 @@ class DinoSVDMSTPPTrainer:
             num_fake = labels.count(1)
             total = num_real + num_fake
             
-            # Weight inversely proportional to class frequency
+            # Weight inversely proportional to class frequency (sklearn balanced formula)
             weights = torch.tensor([
-                num_fake / total,   # weight for Real (0)
-                num_real / total,   # weight for Fake (1)
+                total / (2 * num_real),   # weight for Real (0) — minority gets higher weight
+                total / (2 * num_fake),   # weight for Fake (1) — majority gets lower weight
             ], device=self.device)
             
             print(f"Using class-weighted loss:")
@@ -545,6 +561,12 @@ class DinoSVDMSTPPTrainer:
             
             # Classification loss
             loss = criterion(logits, labels)
+            
+            # SVD regularization losses (only when DinoSVD is unfrozen)
+            if self.dino_unfrozen and hasattr(model, 'dino_svd'):
+                ortho_loss = model.dino_svd.compute_orthogonal_loss()
+                keepsv_loss = model.dino_svd.compute_keepsv_loss()
+                loss = loss + self.ortho_weight * ortho_loss + self.keepsv_weight * keepsv_loss
             
             # Backward pass
             loss.backward()
@@ -1023,6 +1045,8 @@ def main():
         finetune_dino=args.finetune_dino,
         unfreeze_after=args.unfreeze_after,
         dino_lr=args.dino_lr,
+        ortho_weight=args.ortho_weight,
+        keepsv_weight=args.keepsv_weight,
     )
     print("Model and Trainer created successfully!")
     

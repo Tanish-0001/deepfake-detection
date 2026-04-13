@@ -240,10 +240,11 @@ def get_train_transforms(config: Optional[TransformConfig] = None) -> Compose:
         transforms.extend([
             RandomHorizontalFlip(config.horizontal_flip_prob),
             RandomRotation(max_angle=5),
-            ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10),
-            GaussianBlur(kernel_size=3, p=0.2),
+            ColorJitter(brightness=0.25, contrast=0.25, saturation=0.20),
+            GaussianBlur(kernel_size=3, p=0.3),
+            GaussianNoise(std_range=(1.0, 10.0), p=0.3),
             RandomDownscale(scale_range=(0.5, 0.9), p=0.3),
-            JPEGCompression(quality_range=(60, 100), p=0.3),
+            JPEGCompression(quality_range=(40, 100), p=0.3),
             RandomCutout(num_patches=1, size_range=(0.05, 0.12), p=0.2),
         ])
     
