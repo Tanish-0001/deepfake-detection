@@ -92,6 +92,8 @@ def create_dataloaders(
             replacement=True
         )
         shuffle_train = False  # Sampler handles shuffling
+        print(f"Weighted Sampler Active! Total samples: {len(weights)}")
+        print(f"Real weight: {weights[0]:.6f}, Fake weight: {weights[-1]:.6f}")
     
     train_loader = DataLoader(
         train_dataset,
@@ -145,7 +147,8 @@ def create_ff_dataloaders(
     use_cache: bool = True,
     require_cache: bool = True,
     preload_cache: bool = True,
-    collate_fn=None
+    collate_fn=None,
+    use_weighted_sampler=True
 ) -> Tuple:
     """
     Create DataLoaders for FaceForensics++ dataset.
@@ -266,7 +269,8 @@ def create_ff_dataloaders(
         test_dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        use_weighted_sampler=use_weighted_sampler
     )
 
 
@@ -299,7 +303,8 @@ def create_celeb_df_dataloaders(
     use_cache: bool = True,
     require_cache: bool = True,
     preload_cache: bool = True,
-    collate_fn=None
+    collate_fn=None,
+    use_weighted_sampler=True
 ) -> Tuple:
     """
     Create DataLoaders for Celeb-DF-v2 dataset.
@@ -399,7 +404,8 @@ def create_celeb_df_dataloaders(
         test_dataset,
         batch_size=batch_size,
         num_workers=num_workers,
-        collate_fn=collate_fn
+        collate_fn=collate_fn,
+        use_weighted_sampler=use_weighted_sampler
     )
 
 
@@ -416,7 +422,8 @@ def create_combined_dataloaders(
     pin_memory: bool = True,
     config=None,
     test_only: bool = False,
-    collate_fn=None
+    collate_fn=None,
+    use_weighted_sampler=True
 ) -> Tuple:
     """
     Create DataLoaders for combined multi-dataset training.
@@ -525,7 +532,7 @@ def create_combined_dataloaders(
     import multiprocessing
     mp_context = 'spawn' if num_workers > 0 else None
     
-    if not test_only:
+    if not test_only and use_weighted_sampler:
         # Create weighted sampler for training
         train_sampler = None
         shuffle_train = True
@@ -553,6 +560,27 @@ def create_combined_dataloaders(
             batch_size=batch_size,
             shuffle=shuffle_train,
             sampler=train_sampler,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=True,
+            multiprocessing_context=mp_context,
+            collate_fn=collate_fn
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            multiprocessing_context=mp_context,
+            collate_fn=collate_fn
+        )
+    elif not test_only and not use_weighted_sampler:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=True,

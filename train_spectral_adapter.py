@@ -37,6 +37,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from sklearn.metrics import (
+    roc_curve,
     roc_auc_score,
     accuracy_score,
     f1_score,
@@ -125,7 +126,7 @@ def parse_args():
         help="Learning rate scheduler"
     )
     parser.add_argument(
-        "--use_class_weights", action="store_true", default=True,
+        "--use_class_weights", action="store_true", default=False,
         help="Use class-weighted loss for imbalanced data"
     )
 
@@ -459,15 +460,20 @@ class SpectralAdapterTrainer:
         all_probs = np.array(all_probs)
 
         if threshold is None:
-            best_f1 = -1.0
-            best_threshold = 0.5
-            for th in np.arange(0.1, 0.91, 0.01):
-                preds = (all_probs >= th).astype(int)
-                f1 = f1_score(all_labels, preds, zero_division=0)
-                if f1 > best_f1:
-                    best_f1 = f1
-                    best_threshold = th
-            threshold = float(best_threshold)
+            # roc_curve calculates the False Positive Rate (FPR) and True Positive Rate (TPR) 
+            # for all possible thresholds in your probability array.
+            fpr, tpr, thresholds_roc = roc_curve(all_labels, all_probs)
+            
+            # Youden's J statistic = Sensitivity (TPR) + Specificity (1 - FPR) - 1
+            # Mathematically, this simplifies to: J = TPR - FPR
+            j_scores = tpr - fpr
+            
+            # Find the index of the highest J score
+            best_idx = np.argmax(j_scores)
+            
+            # Extract the corresponding optimal threshold
+            threshold = float(thresholds_roc[best_idx])
+            threshold = max(0.1, min(0.9, threshold))  # Clamp the threshold to prevent extreme edge cases
 
         all_preds = (all_probs >= threshold).astype(int)
 
@@ -735,16 +741,22 @@ def main():
     args = parse_args()
     config = create_config(args)
 
+    use_weighted_sampler = True
+    if args.use_class_weights:
+        use_weighted_sampler = False
+
     print("Loading data...")
     if args.dataset == "ff":
         train_loader, val_loader, test_loader = create_ff_dataloaders(
             root_dir=Path("Datasets/FF"), config=config,
-            frames_per_video=args.frames_per_video, video_level=True
+            frames_per_video=args.frames_per_video, video_level=True,
+            use_weighted_sampler=use_weighted_sampler
         )
     elif args.dataset == "celeb_df":
         train_loader, val_loader, test_loader = create_celeb_df_dataloaders(
             root_dir=Path("Datasets/Celeb-DF-v2"), config=config,
-            frames_per_video=args.frames_per_video, video_level=True
+            frames_per_video=args.frames_per_video, video_level=True,
+            use_weighted_sampler=use_weighted_sampler
         )
     else:
         train_loader, val_loader, test_loader = get_dataloaders(
@@ -756,6 +768,7 @@ def main():
             batch_size=args.batch_size,
             frames_per_video=args.frames_per_video,
             video_level=True,
+            use_weighted_sampler=use_weighted_sampler
         )
 
     print("\nCreating model...")
