@@ -1,6 +1,7 @@
 Datasets/
 logs/
 cache/
+venv/
 __pycache__/
 .cursorrules
 checkpoints/
@@ -8,3 +9,4 @@ checkpoints/
 *.png
 *.pth
 *.pt
+.svd_cache

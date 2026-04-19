@@ -124,9 +124,22 @@ class FFDataset(Dataset):
         self._preloaded_cache = {}
         if self.preload_cache:
             self._preload_all_cache()
+
+    @staticmethod
+    def _extract_manipulation_type(video_path: Path) -> Optional[str]:
+        """Extract manipulation type from a video path, or None if it's a real video."""
+        path_str = str(video_path)
+        if 'manipulated_sequences' in path_str:
+            parts = path_str.replace('\\', '/').split('/')
+            try:
+                idx = parts.index('manipulated_sequences')
+                return parts[idx + 1]
+            except (ValueError, IndexError):
+                return None
+        return None
     
     def _load_video_list(self):
-        """Load video paths from JSON split file."""
+        """Load video paths from JSON split file, filtering by manipulation_types."""
         json_path = self.root_dir / f"{self.split}_paths.json"
         
         with open(json_path, 'r') as f:
@@ -135,11 +148,19 @@ class FFDataset(Dataset):
         self.video_list = []
         self.labels = []
         skipped_no_cache = 0
+        skipped_manip_filter = 0
         
         # Load videos from the paths file which contains path and label for each video
         for entry in video_entries:
             video_path = Path(entry["path"])
             label = entry["label"]
+
+            # Filter fake videos by manipulation type
+            if label == 1:
+                manip_type = self._extract_manipulation_type(video_path)
+                if manip_type is not None and manip_type not in self.manipulation_types:
+                    skipped_manip_filter += 1
+                    continue
             
             # Check if cache exists when require_cache is True
             if self.require_cache:
@@ -154,6 +175,9 @@ class FFDataset(Dataset):
         
         print(f"Loaded {len(self.video_list)} videos for {self.split} split")
         print(f"  Real: {self.labels.count(0)}, Fake: {self.labels.count(1)}")
+        print(f"  Manipulation types: {self.manipulation_types}")
+        if skipped_manip_filter > 0:
+            print(f"  Skipped {skipped_manip_filter} videos not matching manipulation filter")
         if skipped_no_cache > 0:
             print(f"  Skipped {skipped_no_cache} videos without cache (require_cache=True)")
     
@@ -177,10 +201,9 @@ class FFDataset(Dataset):
     
     def _preload_all_cache(self):
         """Preload all cached data into memory for faster access."""
-        from tqdm import tqdm
         print(f"Preloading {len(self.video_list)} cached videos into memory...")
         
-        for video_idx in tqdm(range(len(self.video_list)), desc="Preloading cache"):
+        for video_idx in range(len(self.video_list)):
             cache_path = self._get_cache_path(video_idx)
             if cache_path.exists():
                 try:
@@ -374,9 +397,22 @@ class FFVideoDataset(Dataset):
         self._preloaded_cache = {}
         if self.preload_cache:
             self._preload_all_cache()
+
+    @staticmethod
+    def _extract_manipulation_type(video_path: Path) -> Optional[str]:
+        """Extract manipulation type from a video path, or None if it's a real video."""
+        path_str = str(video_path)
+        if 'manipulated_sequences' in path_str:
+            parts = path_str.replace('\\', '/').split('/')
+            try:
+                idx = parts.index('manipulated_sequences')
+                return parts[idx + 1]
+            except (ValueError, IndexError):
+                return None
+        return None
     
     def _load_video_list(self):
-        """Load video paths from JSON split file."""
+        """Load video paths from JSON split file, filtering by manipulation type."""
         json_path = self.root_dir / f"{self.split}_paths.json"
         
         with open(json_path, 'r') as f:
@@ -385,11 +421,19 @@ class FFVideoDataset(Dataset):
         self.video_list = []
         self.labels = []
         skipped_no_cache = 0
+        skipped_manip_filter = 0
         
         # Load videos from the paths file which contains path and label for each video
         for entry in video_entries:
             video_path = Path(entry["path"])
             label = entry["label"]
+
+            # Filter fake videos by manipulation type
+            if label == 1:
+                manip_type = self._extract_manipulation_type(video_path)
+                if manip_type is not None and manip_type not in self.manipulation_types:
+                    skipped_manip_filter += 1
+                    continue
             
             # Check if cache exists when require_cache is True
             if self.require_cache:
@@ -404,6 +448,9 @@ class FFVideoDataset(Dataset):
         
         print(f"Loaded {len(self.video_list)} videos for {self.split} split")
         print(f"  Real: {self.labels.count(0)}, Fake: {self.labels.count(1)}")
+        print(f"  Manipulation types: {self.manipulation_types}")
+        if skipped_manip_filter > 0:
+            print(f"  Skipped {skipped_manip_filter} videos not matching manipulation filter")
         if skipped_no_cache > 0:
             print(f"  Skipped {skipped_no_cache} videos without cache (require_cache=True)")
     
@@ -419,10 +466,9 @@ class FFVideoDataset(Dataset):
     
     def _preload_all_cache(self):
         """Preload all cached data into memory."""
-        from tqdm import tqdm
         print(f"Preloading {len(self.video_list)} cached videos into memory...")
         
-        for video_idx in tqdm(range(len(self.video_list)), desc="Preloading cache"):
+        for video_idx in range(len(self.video_list)):
             cache_path = self._get_cache_path(video_idx)
             if cache_path.exists():
                 try:

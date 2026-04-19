@@ -66,7 +66,7 @@ class SpectralAdapter(nn.Module):
         self.W_up = nn.Linear(bottleneck_dim, embed_dim, bias=True)
 
         # Initialise up-projection to near-zero so adapter starts neutral
-        nn.init.zeros_(self.W_up.weight)
+        nn.init.normal_(self.W_up.weight, std=0.002)
         nn.init.zeros_(self.W_up.bias)
 
     def forward(

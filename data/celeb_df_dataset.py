@@ -165,10 +165,9 @@ class CelebDFDataset(Dataset):
     
     def _preload_all_cache(self):
         """Preload all cached data into memory for faster access."""
-        from tqdm import tqdm
         print(f"Preloading {len(self.video_list)} cached videos into memory...")
         
-        for video_idx in tqdm(range(len(self.video_list)), desc="Preloading cache"):
+        for video_idx in range(len(self.video_list)):
             cache_path = self._get_cache_path(video_idx)
             if cache_path.exists():
                 try:
@@ -392,10 +391,9 @@ class CelebDFVideoDataset(Dataset):
     
     def _preload_all_cache(self):
         """Preload all cached data into memory."""
-        from tqdm import tqdm
         print(f"Preloading {len(self.video_list)} cached videos into memory...")
         
-        for video_idx in tqdm(range(len(self.video_list)), desc="Preloading cache"):
+        for video_idx in range(len(self.video_list)):
             cache_path = self._get_cache_path(video_idx)
             if cache_path.exists():
                 try:

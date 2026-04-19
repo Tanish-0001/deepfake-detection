@@ -274,6 +274,161 @@ def create_ff_dataloaders(
     )
 
 
+def create_ff_cross_manipulation_dataloaders(
+    root_dir: Union[str, Path],
+    train_manipulations: List[str],
+    eval_manipulations: List[str],
+    batch_size: int = 32,
+    num_workers: int = 0,
+    frames_per_video: int = 10,
+    compression: str = "c23",
+    video_level: bool = False,
+    config=None,
+    use_cache: bool = True,
+    require_cache: bool = True,
+    preload_cache: bool = True,
+    collate_fn=None,
+    use_weighted_sampler=True
+) -> Tuple:
+    """
+    Create FF++ DataLoaders with different manipulation types for train vs val/test.
+    
+    This supports cross-manipulation generalization experiments where the model
+    is trained on one subset of forgery methods and evaluated on unseen ones.
+    
+    Real (original) videos are always included in all splits.
+    
+    Args:
+        root_dir: Root directory of FF++ dataset
+        train_manipulations: List of manipulation types for training (e.g., ["NeuralTextures"])
+        eval_manipulations: List of manipulation types for validation/testing 
+                           (e.g., ["Deepfakes", "Face2Face", "FaceSwap"])
+        batch_size: Batch size
+        num_workers: Number of worker processes (0 recommended when preload_cache=True)
+        frames_per_video: Number of frames per video
+        compression: Compression level
+        video_level: Whether to use video-level dataset
+        config: Optional configuration object
+        use_cache: Whether to use cached preprocessed data
+        require_cache: If True, only use videos with existing cache
+        preload_cache: If True, load all cache into RAM at startup
+        collate_fn: Custom collate function
+        use_weighted_sampler: Whether to use weighted sampling for imbalanced data
+        
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader)
+        
+    Example:
+        train_loader, val_loader, test_loader = create_ff_cross_manipulation_dataloaders(
+            root_dir="Datasets/FF",
+            train_manipulations=["NeuralTextures"],
+            eval_manipulations=["Deepfakes", "Face2Face", "FaceSwap"],
+        )
+    """
+    from preprocessing.pipeline import PreprocessingPipeline
+    
+    root_dir = Path(root_dir)
+    
+    # Override with config if provided (but NOT manipulation_types — those are explicit args)
+    if config is not None:
+        batch_size = config.data.batch_size
+        num_workers = config.data.num_workers
+        frames_per_video = config.preprocessing.frames_per_video
+        compression = config.data.compression
+        use_cache = config.data.use_cache
+        if hasattr(config.data, 'preload_cache'):
+            preload_cache = config.data.preload_cache
+    
+    # When preloading cache, num_workers=0 is optimal (data already in RAM)
+    if preload_cache and num_workers > 0:
+        print(f"Note: Using num_workers=0 since preload_cache=True (data loaded into RAM)")
+        num_workers = 0
+    
+    # Create transforms
+    transform_config = TransformConfig()
+    train_transform = get_train_transforms(transform_config)
+    val_transform = get_val_transforms(transform_config)
+    
+    # Create preprocessing pipelines (only used if cache miss)
+    train_pipeline = PreprocessingPipeline(
+        num_frames=frames_per_video,
+        sampling_strategy="uniform"
+    )
+    val_pipeline = PreprocessingPipeline(
+        num_frames=frames_per_video,
+        sampling_strategy="uniform"
+    )
+    
+    # Select dataset class
+    DatasetClass = FFVideoDataset if video_level else FFDataset
+    
+    print(f"\n{'='*60}")
+    print(f"Cross-Manipulation Generalization Setup")
+    print(f"  Train manipulations: {train_manipulations}")
+    print(f"  Eval manipulations:  {eval_manipulations}")
+    print(f"{'='*60}\n")
+    
+    # Training set: uses train_manipulations
+    print("--- Training Set (train manipulations) ---")
+    train_dataset = DatasetClass(
+        root_dir=root_dir,
+        split="train",
+        manipulation_types=train_manipulations,
+        compression=compression,
+        frames_per_video=frames_per_video,
+        transform=train_transform,
+        preprocessing_pipeline=train_pipeline,
+        use_cache=use_cache,
+        require_cache=require_cache,
+        preload_cache=preload_cache
+    )
+    
+    # Validation set: uses eval_manipulations
+    print("\n--- Validation Set (eval manipulations) ---")
+    val_dataset = DatasetClass(
+        root_dir=root_dir,
+        split="val",
+        manipulation_types=eval_manipulations,
+        compression=compression,
+        frames_per_video=frames_per_video,
+        transform=val_transform,
+        preprocessing_pipeline=val_pipeline,
+        use_cache=use_cache,
+        require_cache=require_cache,
+        preload_cache=preload_cache
+    )
+    
+    # Test set: uses eval_manipulations
+    print("\n--- Test Set (eval manipulations) ---")
+    test_dataset = DatasetClass(
+        root_dir=root_dir,
+        split="test",
+        manipulation_types=eval_manipulations,
+        compression=compression,
+        frames_per_video=frames_per_video,
+        transform=val_transform,
+        preprocessing_pipeline=val_pipeline,
+        use_cache=use_cache,
+        require_cache=require_cache,
+        preload_cache=preload_cache
+    )
+    
+    # Auto-use video_collate_fn for video-level datasets if not specified
+    if video_level and collate_fn is None:
+        collate_fn = video_collate_fn
+    
+    # Create dataloaders
+    return create_dataloaders(
+        train_dataset,
+        val_dataset,
+        test_dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        use_weighted_sampler=use_weighted_sampler
+    )
+
+
 def video_collate_fn(batch):
     """
     Custom collate function for video-level batches.

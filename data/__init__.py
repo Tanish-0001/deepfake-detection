@@ -10,6 +10,7 @@ from .combined_dataset import (
 from .dataloader import (
     create_dataloaders,
     create_ff_dataloaders,
+    create_ff_cross_manipulation_dataloaders,
     create_celeb_df_dataloaders,
     create_combined_dataloaders,
     get_dataloaders,
@@ -42,6 +43,7 @@ __all__ = [
     # Dataloader functions
     'create_dataloaders',
     'create_ff_dataloaders',
+    'create_ff_cross_manipulation_dataloaders'
     'create_celeb_df_dataloaders',
     'create_combined_dataloaders',
     'get_dataloaders',

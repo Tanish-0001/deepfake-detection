@@ -1,17 +1,7 @@
-"""
-DINO SVD Model for Deepfake Detection.
-
-This model uses DINO (DINOv2) as the backbone and applies Singular Value Decomposition (SVD)
-to decompose the original feature space into two orthogonal subspaces:
-- Principal subspace: Preserves pre-trained knowledge (frozen)
-- Residual subspace: Learns new forgery patterns (trainable)
-
-This approach avoids distortion of the original rich feature space during learning fakes.
-
-Based on the EFFORT approach for deepfake detection.
-"""
-
+import hashlib
 import math
+import os
+import time
 from typing import List, Optional
 
 import torch
@@ -19,6 +9,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .base_model import BaseModel
+
+# Directory to cache SVD-decomposed backbones (avoids recomputing SVD on every load)
+_MODELS_DIR = os.path.dirname(os.path.abspath(__file__))
+_SVD_CACHE_DIR = os.path.join(_MODELS_DIR, '.svd_cache')
 
 
 class SVDResidualLinear(nn.Module):
@@ -77,8 +71,8 @@ class SVDResidualLinear(nn.Module):
         self.V_r = None
         
         # Frobenius norms for loss computation
-        self.weight_original_fnorm = None
-        self.weight_main_fnorm = None
+        self.register_buffer('weight_original_fnorm', torch.tensor(0.0))
+        self.register_buffer('weight_main_fnorm', torch.tensor(0.0))
     
     def compute_current_weight(self) -> torch.Tensor:
         """Compute the current effective weight (main + residual)."""
@@ -143,7 +137,7 @@ class SVDResidualLinear(nn.Module):
         
         This helps preserve the magnitude of the original weight matrix.
         """
-        if self.S_residual is not None and self.weight_original_fnorm is not None:
+        if self.S_residual is not None and self.weight_original_fnorm > 0.0:
             # Total current weight
             weight_current = self.weight_main + self.U_residual @ torch.diag(self.S_residual) @ self.V_residual
             # Frobenius norm of current weight
@@ -166,7 +160,7 @@ class SVDResidualLinear(nn.Module):
         return loss
 
 
-def replace_with_svd_residual(module: nn.Linear, r: int) -> SVDResidualLinear:
+def replace_with_svd_residual(module: nn.Linear, r: int, skeleton_only: bool = False) -> SVDResidualLinear:
     """
     Replace an nn.Linear module with SVDResidualLinear.
     
@@ -177,6 +171,9 @@ def replace_with_svd_residual(module: nn.Linear, r: int) -> SVDResidualLinear:
     Args:
         module: Original nn.Linear module to replace
         r: Number of top singular values to keep fixed
+        skeleton_only: If True, create the module structure with correct shapes
+                      but skip the expensive SVD computation (weights will be
+                      filled later via load_state_dict).
         
     Returns:
         SVDResidualLinear module with SVD-decomposed weights
@@ -192,21 +189,44 @@ def replace_with_svd_residual(module: nn.Linear, r: int) -> SVDResidualLinear:
     new_module = SVDResidualLinear(
         in_features, out_features, r, 
         bias=bias, 
-        init_weight=module.weight.data.clone()
+        init_weight=module.weight.data.clone() if not skeleton_only else None
     )
     
     # Copy bias if present
-    if bias and module.bias is not None:
+    if bias and module.bias is not None and not skeleton_only:
         new_module.bias.data.copy_(module.bias.data)
     
+    # Ensure r does not exceed the number of singular values
+    k = min(in_features, out_features)  # max number of singular values
+    r = min(r, k)
+    residual_rank = k - r
+    
+    if skeleton_only:
+        # ---- Fast path: create parameters with correct shapes, no SVD ----
+        if residual_rank > 0:
+            new_module.S_residual = nn.Parameter(torch.zeros(residual_rank))
+            new_module.U_residual = nn.Parameter(torch.zeros(out_features, residual_rank))
+            new_module.V_residual = nn.Parameter(torch.zeros(residual_rank, in_features))
+            
+            new_module.S_r = nn.Parameter(torch.zeros(r), requires_grad=False)
+            new_module.U_r = nn.Parameter(torch.zeros(out_features, r), requires_grad=False)
+            new_module.V_r = nn.Parameter(torch.zeros(r, in_features), requires_grad=False)
+        else:
+            new_module.S_residual = None
+            new_module.U_residual = None
+            new_module.V_residual = None
+            new_module.S_r = None
+            new_module.U_r = None
+            new_module.V_r = None
+        
+        return new_module
+    
+    # ---- Slow path: full SVD computation ----
     # Store original weight Frobenius norm
-    new_module.weight_original_fnorm = torch.norm(module.weight.data, p='fro')
+    new_module.weight_original_fnorm.copy_(torch.norm(module.weight.data, p='fro'))
     
     # Perform SVD on the original weight
     U, S, Vh = torch.linalg.svd(module.weight.data, full_matrices=False)
-    
-    # Ensure r does not exceed the number of singular values
-    r = min(r, len(S))
     
     # Keep top r singular components (main weight - frozen)
     U_r = U[:, :r]      # Shape: (out_features, r)
@@ -217,7 +237,7 @@ def replace_with_svd_residual(module: nn.Linear, r: int) -> SVDResidualLinear:
     weight_main = U_r @ torch.diag(S_r) @ Vh_r
     
     # Calculate the Frobenius norm of main weight
-    new_module.weight_main_fnorm = torch.norm(weight_main, p='fro')
+    new_module.weight_main_fnorm.copy_(torch.norm(weight_main, p='fro'))
     
     # Set the main weight
     new_module.weight_main.data.copy_(weight_main)
@@ -249,7 +269,8 @@ def replace_with_svd_residual(module: nn.Linear, r: int) -> SVDResidualLinear:
 
 
 def apply_svd_residual_to_attn(model: nn.Module, r: int, 
-                                target_modules: List[str] = None) -> nn.Module:
+                                target_modules: List[str] = None,
+                                skeleton_only: bool = False) -> nn.Module:
     """
     Apply SVD residual decomposition to attention layers in a model.
     
@@ -258,6 +279,7 @@ def apply_svd_residual_to_attn(model: nn.Module, r: int,
         r: Number of top singular values to keep fixed
         target_modules: List of module name patterns to target. 
                        If None, targets 'attn' modules by default.
+        skeleton_only: If True, create module structure without SVD computation.
     
     Returns:
         Model with SVDResidualLinear layers in attention modules
@@ -274,7 +296,7 @@ def apply_svd_residual_to_attn(model: nn.Module, r: int,
             
             if is_target and isinstance(module, nn.Linear):
                 # Replace this Linear layer
-                setattr(parent_module, name, replace_with_svd_residual(module, r))
+                setattr(parent_module, name, replace_with_svd_residual(module, r, skeleton_only=skeleton_only))
             elif isinstance(module, nn.Linear):
                 # Not a target, skip
                 pass
@@ -345,18 +367,58 @@ class DinoSVDModel(BaseModel):
         self.svd_rank = svd_rank if svd_rank is not None else self.feature_dim - 1
         self.target_modules = target_modules if target_modules is not None else ['attn']
         
-        # Load DINO backbone
-        self.backbone = torch.hub.load(
-            'facebookresearch/dinov2',
-            dino_model
-        )
+        # Build a deterministic cache key from the configuration (v2 to avoid bugged caches)
+        cache_key_str = f"{dino_model}_r{self.svd_rank}_{'_'.join(sorted(self.target_modules))}_v2"
+        cache_hash = hashlib.md5(cache_key_str.encode()).hexdigest()[:12]
+        cache_filename = f"backbone_svd_{cache_key_str}_{cache_hash}.pt"
+        cache_path = os.path.join(_SVD_CACHE_DIR, cache_filename)
         
-        # Apply SVD residual decomposition to attention layers
-        self.backbone = apply_svd_residual_to_attn(
-            self.backbone, 
-            r=self.svd_rank,
-            target_modules=self.target_modules
-        )
+        if os.path.exists(cache_path):
+            # ---- Fast path: load hub model + skeleton structure, then fill from cache ----
+            print(f"[DinoSVD] Loading cached SVD state_dict from {cache_path}")
+            t0 = time.time()
+            
+            # Load backbone from hub (fast — already downloaded to hub cache)
+            self.backbone = torch.hub.load(
+                'facebookresearch/dinov2',
+                dino_model
+            )
+            
+            # Create SVDResidualLinear module structure WITHOUT computing SVD
+            self.backbone = apply_svd_residual_to_attn(
+                self.backbone, 
+                r=self.svd_rank,
+                target_modules=self.target_modules,
+                skeleton_only=True
+            )
+            
+            # Load the pre-computed SVD weights
+            cached_state_dict = torch.load(cache_path, map_location='cpu', weights_only=True)
+            self.backbone.load_state_dict(cached_state_dict)
+            print(f"[DinoSVD] Cached backbone loaded in {time.time() - t0:.1f}s")
+        else:
+            # ---- Slow path: load from hub + compute SVD (first time only) ----
+            print(f"[DinoSVD] No cache found. Computing SVD decomposition (one-time cost)...")
+            t0 = time.time()
+            
+            # Load DINO backbone
+            self.backbone = torch.hub.load(
+                'facebookresearch/dinov2',
+                dino_model
+            )
+            
+            # Apply SVD residual decomposition to attention layers
+            self.backbone = apply_svd_residual_to_attn(
+                self.backbone, 
+                r=self.svd_rank,
+                target_modules=self.target_modules
+            )
+            
+            # Save state_dict to cache for future fast loads
+            os.makedirs(_SVD_CACHE_DIR, exist_ok=True)
+            torch.save(self.backbone.state_dict(), cache_path)
+            print(f"[DinoSVD] SVD decomposition computed and cached in {time.time() - t0:.1f}s")
+            print(f"[DinoSVD] Cache saved to {cache_path}")
         
         # Build classifier head
         if hidden_dims is None:

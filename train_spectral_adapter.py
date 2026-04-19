@@ -741,9 +741,7 @@ def main():
     args = parse_args()
     config = create_config(args)
 
-    use_weighted_sampler = True
-    if args.use_class_weights:
-        use_weighted_sampler = False
+    use_weighted_sampler = not args.use_class_weights
 
     print("Loading data...")
     if args.dataset == "ff":
