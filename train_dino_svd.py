@@ -102,7 +102,7 @@ def parse_args():
     parser.add_argument(
         "--dropout",
         type=float,
-        default=0.2,
+        default=0.1,
         help="Dropout rate"
     )
     parser.add_argument(
@@ -152,7 +152,7 @@ def parse_args():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=60,
+        default=100,
         help="Number of training epochs"
     )
     parser.add_argument(
@@ -196,12 +196,13 @@ def parse_args():
     parser.add_argument(
         "--use_class_weights",
         action="store_true",
-        default=True,
+        default=False,
         help="Use class-weighted loss for imbalanced data"
     )
 
     parser.add_argument(
-        "--eval_only",
+        "--eval_only", 
+        action="store_true", 
         default=False,
         help="Run evaluation only (no training)"
     )
@@ -216,7 +217,7 @@ def parse_args():
     parser.add_argument(
         "--patience",
         type=int,
-        default=10,
+        default=25,
         help="Early stopping patience"
     )
     
@@ -694,7 +695,15 @@ class DinoSVDTrainer:
         """Load a checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        model.load_state_dict(checkpoint['model_state_dict'])
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        
+        # Safely ignore missing 'fnorm' buffers since they are already loaded from the SVD cache
+        missing_keys = [k for k in missing_keys if not k.endswith('_fnorm')]
+        if missing_keys:
+            print(f"Warning: Missing keys in checkpoint: {missing_keys}")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys in checkpoint: {unexpected_keys}")
+            
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         
         if scheduler and checkpoint['scheduler_state_dict']:
@@ -792,7 +801,7 @@ class DinoSVDTrainer:
             self.history['learning_rates'].append(optimizer.param_groups[0]['lr'])
             
             # Check for improvement
-            is_best = val_metrics['acc'] > self.best_val_acc
+            is_best = val_metrics['auc'] > self.best_val_auc
             if is_best:
                 self.best_val_auc = val_metrics['auc']
                 self.best_val_acc = val_metrics['acc']
@@ -930,6 +939,8 @@ def main():
     """Main training function."""
     args = parse_args()
     config = create_config(args)
+
+    use_weighted_sampler = not args.use_class_weights
     
     print("=" * 60)
     print("DINO SVD Model Training for Deepfake Detection")
@@ -964,14 +975,16 @@ def main():
             root_dir=Path("Datasets/FF"),
             config=config,
             frames_per_video=args.frames_per_video,
-            video_level=True
+            video_level=True,
+            use_weighted_sampler=use_weighted_sampler
         )
     elif args.dataset == "celeb_df":
         train_loader, val_loader, test_loader = create_celeb_df_dataloaders(
             root_dir=Path("Datasets/Celeb-DF-v2"),
             config=config,
             frames_per_video=args.frames_per_video,
-            video_level=True
+            video_level=True,
+            use_weighted_sampler=use_weighted_sampler
         )
     else:  # combined
         dataset_configs = [
@@ -983,7 +996,8 @@ def main():
             dataset_configs=dataset_configs,
             batch_size=args.batch_size,
             frames_per_video=args.frames_per_video,
-            video_level=True
+            video_level=True,
+            use_weighted_sampler=use_weighted_sampler
         )
     
     print(f"Train samples: {len(train_loader.dataset)}")
@@ -1049,7 +1063,6 @@ def main():
     print(f"Confusion Matrix:")
     print(f"  TN={test_metrics['confusion_matrix'][0,0]:5d}  FP={test_metrics['confusion_matrix'][0,1]:5d}")
     print(f"  FN={test_metrics['confusion_matrix'][1,0]:5d}  TP={test_metrics['confusion_matrix'][1,1]:5d}")
-
 
 
 if __name__ == "__main__":

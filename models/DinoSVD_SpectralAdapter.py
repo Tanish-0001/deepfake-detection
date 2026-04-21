@@ -364,7 +364,10 @@ class DinoSVD_SpectralAdapter_Model(nn.Module):
         x_tokens = self.dino_svd.backbone.norm(x_tokens)
 
         # ---- Mean-pool patch tokens (skip CLS at position 0) ----
-        features = x_tokens[:, 1:, :].mean(dim=1)           # (B, D)
+        mean_feat = x_tokens[:, 1:, :].mean(dim=1)
+        # max_feat = x_tokens[:, 1:, :].max(dim=1)[0]   
+        # features = torch.cat([mean_feat, max_feat], dim=1)           # (B, D)
+        features = mean_feat
 
         # ---- Classifier (trainable) ----
         logits = self.classifier(features)

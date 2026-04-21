@@ -25,6 +25,8 @@ import argparse
 import json
 import time
 import sys
+import base64
+from datetime import datetime
 from pathlib import Path
 from dataclasses import asdict
 from typing import Dict, Any, Optional, List
@@ -53,7 +55,11 @@ sys.path.insert(0, str(project_root))
 from config.config import Config, DataConfig, TrainingConfig, PreprocessingConfig
 from models.DinoSVD_SpectralAdapter import DinoSVD_SpectralAdapter_Model
 from data import get_dataloaders
-from data.dataloader import create_ff_dataloaders, create_celeb_df_dataloaders
+from data.dataloader import (
+    create_ff_dataloaders,
+    create_celeb_df_dataloaders,
+    create_ff_cross_manipulation_dataloaders,
+)
 
 
 def parse_args():
@@ -66,6 +72,10 @@ def parse_args():
     parser.add_argument(
         "--dataset", type=str, default="ff", choices=["ff", "celeb_df", "combined"],
         help="Dataset to train on"
+    )
+    parser.add_argument(
+        "--cross_manip", type=str, nargs="+", default=None,
+        help="Run cross-manipulation experiments on FF++. Specify training manipulations (e.g., 'NeuralTextures'). Eval will use the others."
     )
     parser.add_argument(
         "--frames_per_video", type=int, default=10,
@@ -176,6 +186,7 @@ class SpectralAdapterTrainer:
         unfreeze_after: int = 10,
         unfreeze_schedule: List[int] = None,
         dino_lr: float = 1e-5,
+        run_suffix: str = "",
     ):
         self.config = config
         self.training_config = config.training
@@ -186,6 +197,7 @@ class SpectralAdapterTrainer:
         self.unfreeze_schedule = unfreeze_schedule if unfreeze_schedule is not None else []
         self.dino_lr = dino_lr
         self.unfrozen_stages = set()
+        self.run_suffix = run_suffix
 
         self.device = self._setup_device()
 
@@ -507,13 +519,14 @@ class SpectralAdapterTrainer:
             'unfrozen_stages': list(self.unfrozen_stages),
         }
 
+        suffix = f"_{self.run_suffix}" if self.run_suffix else ""
         if filename is None:
-            filename = 'checkpoint_latest_spectral_adapter.pt'
+            filename = f'checkpoint_latest_spectral_adapter{suffix}.pt'
 
         torch.save(checkpoint, self.checkpoint_dir / filename)
 
         if is_best:
-            torch.save(checkpoint, self.checkpoint_dir / 'checkpoint_best_spectral_adapter.pt')
+            torch.save(checkpoint, self.checkpoint_dir / f'checkpoint_best_spectral_adapter{suffix}.pt')
             print(f"  Saved best model (AUC: {self.best_val_auc:.4f})")
 
     def _load_checkpoint(self, model, optimizer, scheduler, checkpoint_path):
@@ -635,7 +648,7 @@ class SpectralAdapterTrainer:
             )
 
             # Check improvement
-            is_best = val_metrics['acc'] > self.best_val_acc
+            is_best = val_metrics['auc'] > self.best_val_auc
             if is_best:
                 self.best_val_auc = val_metrics['auc']
                 self.best_val_acc = val_metrics['acc']
@@ -679,7 +692,8 @@ class SpectralAdapterTrainer:
 
         # Final evaluation on test set
         if test_loader:
-            best_ckpt = self.checkpoint_dir / 'checkpoint_best_spectral_adapter.pt'
+            suffix = f"_{self.run_suffix}" if self.run_suffix else ""
+            best_ckpt = self.checkpoint_dir / f'checkpoint_best_spectral_adapter{suffix}.pt'
             if best_ckpt.exists():
                 ckpt = torch.load(best_ckpt, map_location=self.device)
                 model.load_state_dict(ckpt['model_state_dict'])
@@ -741,15 +755,40 @@ def main():
     args = parse_args()
     config = create_config(args)
 
+    cm_str = "-".join(args.cross_manip) if args.cross_manip else "none"
+    cw_str = "1" if args.use_class_weights else "0"
+    
+    # E.g. cm_NeuralTextures_cw_0
+    args_string = f"cm_{cm_str}_cw_{cw_str}"
+    shortened_timestamp = datetime.now().strftime("%m%d_%H%M%S")
+    run_suffix = f"{args_string}_{shortened_timestamp}"
+    print(f"\nRun Context Generated:\n  Run Suffix: {run_suffix}")
+
     use_weighted_sampler = not args.use_class_weights
 
     print("Loading data...")
     if args.dataset == "ff":
-        train_loader, val_loader, test_loader = create_ff_dataloaders(
-            root_dir=Path("Datasets/FF"), config=config,
-            frames_per_video=args.frames_per_video, video_level=True,
-            use_weighted_sampler=use_weighted_sampler
-        )
+        if args.cross_manip is not None:
+            all_manips = ["Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures", "FaceShifter"]
+            train_manips = args.cross_manip
+            eval_manips = [m for m in all_manips if m not in train_manips]
+            print("Train manipulations:", train_manips)
+            print("Eval manipulations:", eval_manips)
+            train_loader, val_loader, test_loader = create_ff_cross_manipulation_dataloaders(
+                root_dir=Path("Datasets/FF"),
+                train_manipulations=train_manips,
+                eval_manipulations=eval_manips,
+                config=config,
+                frames_per_video=args.frames_per_video, 
+                video_level=True,
+                use_weighted_sampler=use_weighted_sampler
+            )
+        else:
+            train_loader, val_loader, test_loader = create_ff_dataloaders(
+                root_dir=Path("Datasets/FF"), config=config,
+                frames_per_video=args.frames_per_video, video_level=True,
+                use_weighted_sampler=use_weighted_sampler
+            )
     elif args.dataset == "celeb_df":
         train_loader, val_loader, test_loader = create_celeb_df_dataloaders(
             root_dir=Path("Datasets/Celeb-DF-v2"), config=config,
@@ -789,6 +828,7 @@ def main():
         unfreeze_after=args.unfreeze_after,
         unfreeze_schedule=args.unfreeze_schedule,
         dino_lr=args.dino_lr,
+        run_suffix=run_suffix,
     )
 
     if not args.eval_only:
@@ -801,8 +841,9 @@ def main():
         )
 
     # Load best checkpoint for final evaluation
+    suffix = f"_{trainer.run_suffix}" if trainer.run_suffix else ""
     best_checkpoint = torch.load(
-        trainer.checkpoint_dir / 'checkpoint_best_spectral_adapter.pt',
+        trainer.checkpoint_dir / f'checkpoint_best_spectral_adapter{suffix}.pt',
         map_location=trainer.device
     )
     model.load_state_dict(best_checkpoint['model_state_dict'])
